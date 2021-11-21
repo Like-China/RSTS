@@ -1,9 +1,8 @@
 import numpy as np
 import torch
-import constants
+import settings
 
 from collections import namedtuple
-
 
 
 def argsort(seq):
@@ -16,7 +15,7 @@ def argsort(seq):
     return [x for x, y in sorted(enumerate(seq), key=lambda x: len(x[1]), reverse=True)]
 
 
-def pad_array(a, max_length, PAD=constants.PAD):
+def pad_array(a, max_length, PAD=settings.PAD):
     """
     :param a: 一条待补位操作的轨迹 (array[int32])
     :param max_length: 该条轨迹所在批次轨迹中 轨迹的最大长度，按该长度标准补位
@@ -107,7 +106,7 @@ def pad_arrays_keep_invp(src):
     src = list(np.array(src)[idx])
     lengths = list(map(len, src))  # [13, 13, 12, 12, 10, 5, 5, 4, 4, 3]
     lengths = torch.LongTensor(lengths)  
-    ## 对位补齐
+    # 对位补齐
     src = pad_arrays(src) 
     invp = torch.LongTensor(invpermute(idx)) # [7, 5, 6, 8, 9, 0, 4, 1, 2, 3]  
     # 使其contiguous()在内存中连续

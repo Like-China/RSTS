@@ -34,7 +34,8 @@ def set_args():
     parser.add_argument("-cityname", default=cityname, help="city name")
     parser.add_argument("-scale", type=float, default=scale, help="city scale")
     parser.add_argument("-time_size", type=float, default=time_size, help="time span nums")
-    parser.add_argument("-data", default=os.path.join('../data', cityname,cityname + str(int(scale * 100000)) + str(time_size)),help="训练集和模型存储目录")
+    parser.add_argument("-data", default=os.path.join('../data', cityname, cityname + str(int(scale * 100000))
+                                                      + str(time_size)), help="训练集和模型存储目录")
     parser.add_argument("-checkpoint", default=os.path.join('../data', cityname,cityname + str(int(scale * 100000)) + str(time_size), 'checkpoint.pt'), help="checkpoint存放目录")
     parser.add_argument("-hot_freq", type=int, default=20, help="hot cell frequency, 计数出现这么多次认为是热度词")
     '''
@@ -68,7 +69,7 @@ def set_args():
     parser.add_argument("-criterion_name", default="KLDIV",help="NLL (Negative Log Likelihood) or KLDIV (KL Divergence)")
     parser.add_argument("-dist_decay_speed", type=float, default=0.8,
         help="""How fast the distance decays in dist2weight, a small value will give high weights for cells far away""")
-    parser.add_argument("-bucketsize", default=[(30,50),(50,70),(80,100)],help="Bucket size for training")
+    parser.add_argument("-bucketsize", default=[(30, 50), (50, 70), (80, 100)],help="Bucket size for training")
     args = parser.parse_args()
     return args
 

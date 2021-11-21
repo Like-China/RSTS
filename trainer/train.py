@@ -1,26 +1,25 @@
-
 import torch
 import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
 from trainer.models import EncoderDecoder
-from loader.data_utils import DataLoader
-import constants, time, os, shutil, logging, h5py
+from loader.data_loader import DataLoader
+import settings, time, os, shutil, logging, h5py
 from tqdm import tqdm
 
-from evaluator.res_evulate import My_criterion
 
-
-
-# 构建NLL评价标准
 def NLLcriterion(vocab_size):
+    """
+    带权的NLLLoss损失函数， 将编码为0的填充位置的权重置为0
+    :param vocab_size:
+    :return: 带权损失函数
+    """
     weight = torch.ones(vocab_size)
-    weight[constants.PAD] = 0
+    weight[settings.PAD] = 0
     # sum-loss求和 null-loss取平均值 none显示全部loss
     criterion = nn.NLLLoss(weight, reduction='sum')
     return criterion
 
-# 该评价模型评价每一批128个目标cell的10个邻居对应的输出权重与真实权重的距离 128*10
-# 只考虑每个点的10个邻居
+
 def KLDIVloss(output, target, criterion, V, D):
     """
     output (batch, vocab_size)  128*18866
@@ -28,69 +27,79 @@ def KLDIVloss(output, target, criterion, V, D):
     criterion (nn.KLDIVLoss)
     V (vocab_size, k) 18866*10
     D (vocab_size, k) 18866*10
+
+    该评价模型评价每一批128个目标cell的10个邻居对应的输出权重与真实权重的距离 128*10
+
+    只考虑每个点的10个邻居
     """
-    ## 获取128个目标cell的10个邻居
+    # 获取128个目标cell的10个邻居
     # 第一个参数是索引的对象，第二个参数0表示按行索引，1表示按列进行索引，第三个参数是一个tensor，就是索引的序号
     indices = torch.index_select(V, 0, target)
     # 收集输出的128个目标对应的10个邻居的权重，是模型预测出来的权重
     outputk = torch.gather(output, 1, indices)
-    ## 获取128个目标cell的10个邻居对应的权重，从D中获取，是真实权重
+    # 获取128个目标cell的10个邻居对应的权重，从D中获取，是真实权重
     targetk = torch.index_select(D, 0, target)
     return criterion(outputk, targetk)
 
-# 考虑所有的点，计算量较大
-def KLDIVloss2(output, target, criterion, V, D):
-    """
-    constructing full target distribution, expensive!
-    """
-    indices = torch.index_select(V, 0, target)
-    targetk = torch.index_select(D, 0, target)
-    fulltarget = torch.zeros(output.size()).scatter_(1, indices, targetk)
-    ## here: need Variable(fulltarget).cuda() if use gpu
-    fulltarget = fulltarget.cuda()
-    return criterion(output, fulltarget)
 
-## 对于K个邻居，按照距离大小给出权重，公式5中的W
 def dist2weight(D, dist_decay_speed=0.8):
+    """
+    对于K个邻居，按照距离大小给出权重，公式5中的W
+
+    :param D: 和topK邻居的距离矩阵
+    :param dist_decay_speed: 衰减指数
+    :return:
+    """
     # D = D.div(100)
     D = torch.exp(-D * dist_decay_speed)
     s = D.sum(dim=1, keepdim=True)
     D = D / s
-    ## The PAD should not contribute to the decoding loss
-    D[constants.PAD, :] = 0.0
+    # The PAD should not contribute to the decoding loss
+    D[settings.PAD, :] = 0.0
     return D
 
 
-## 计算一批训练数据的损失
-def genLoss(gendata, m0, m1, lossF, args):
-    #src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
-    input, lengths, target = gendata.src, gendata.lengths, gendata.trg
+def genLoss(gen_data, m0, m1, loss_function, args):
+    """
+    计算一批训练数据的损失
+
+    :param gen_data:
+    :param m0: encoder-decoder
+    :param m1: 获取中间层的表征向量
+    :param loss_function: 损失函数
+    :param args:
+    :return:
+    """
+    # src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
+    input, lengths, target = gen_data.src, gen_data.lengths, gen_data.trg
     if args.cuda and torch.cuda.is_available():
         input, lengths, target = input.cuda(), lengths.cuda(), target.cuda()
-    ## (seq_len2, batch, hidden_size)
+    #  (seq_len2, batch, hidden_size)
     output = m0(input, lengths, target)
     
     batch = output.size(1)
     loss = 0
-    ## we want to decode target in range [BOS+1:EOS]
+    #  we want to decode target in range [BOS+1:EOS]
     target = target[1:]
     # args.generator_batch 32每一次生成的words数目，要求内存
     # output [max_target_szie, 128, 256]
     for o, t in zip(output.split(args.generator_batch),
                     target.split(args.generator_batch)):
-        ## (seq_len, generator_batch, hidden_size) => (seq_len*generator_batch, hidden_size)
-        # 这里写错维度了 (generator_batch, batch, hidden_size) => (batch*generator_batch, hidden_size)
+        # (generator_batch, batch, hidden_size) => (batch*generator_batch, hidden_size)
         o = o.view(-1, o.size(2))
         o = m1(o)
-        ## (batch*generator_batch,)
+        #  (batch*generator_batch,)
         t = t.view(-1)
-        loss += lossF(o, t)
+        loss += loss_function(o, t)
     return loss.div(batch)
 
-## 计算相似性损失，即三角损失
-## 通过a,p,n三组轨迹，经过前向encoder,接着通过encoder_hn2decoder_h0，取最后一层向量作为每组每个轨迹的代表
+
 def disLoss(a, p, n, m0, triplet_loss, args):
     """
+    计算相似性损失，即三角损失
+
+    通过a,p,n三组轨迹，经过前向encoder,接着通过encoder_hn2decoder_h0，取最后一层向量作为每组每个轨迹的代表
+
     a (named tuple): anchor data
     p (named tuple): positive data
     n (named tuple): negative data
@@ -103,302 +112,255 @@ def disLoss(a, p, n, m0, triplet_loss, args):
         a_src, a_lengths, a_invp = a_src.cuda(), a_lengths.cuda(), a_invp.cuda()
         p_src, p_lengths, p_invp = p_src.cuda(), p_lengths.cuda(), p_invp.cuda()
         n_src, n_lengths, n_invp = n_src.cuda(), n_lengths.cuda(), n_invp.cuda()
-    ## (num_layers * num_directions, batch, hidden_size)  (2*3, 128, 256/2)
+    # (num_layers * num_directions, batch, hidden_size)  (2*3, 128, 256/2)
     a_h, _ = m0.encoder(a_src, a_lengths)
     p_h, _ = m0.encoder(p_src, p_lengths)
     n_h, _ = m0.encoder(n_src, n_lengths)
-    ## (num_layers, batch, hidden_size * num_directions) (3,128,256)
+    # (num_layers, batch, hidden_size * num_directions) (3,128,256)
     a_h = m0.encoder_hn2decoder_h0(a_h)
     p_h = m0.encoder_hn2decoder_h0(p_h)
     n_h = m0.encoder_hn2decoder_h0(n_h)
-    ## take the last layer as representations (batch, hidden_size * num_directions) (128,256)
+    # take the last layer as representations (batch, hidden_size * num_directions) (128,256)
     a_h, p_h, n_h = a_h[-1], p_h[-1], n_h[-1]
     return triplet_loss(a_h[a_invp], p_h[p_invp], n_h[n_invp])  # (128,256)
 
-## 模型参数初始化
+
 def init_parameters(model):
+    # 模型参数初始化
     for p in model.parameters():
         p.data.uniform_(-0.1, 0.1)
 
-# 将当前训练状态存储到args.checkpoint目录对应的checkpoint.pt文件中
-def savecheckpoint(state, is_best, args):
+
+def save_checkpoint(state, is_best, args):
     torch.save(state, args.checkpoint)
     # 如果当前状态是最好状态，则替换最好状态文件
     if is_best:
         shutil.copyfile(args.checkpoint, os.path.join(args.data, 'best_model.pt'))
 
-# 验证获取genLoss, 这才是真正的损失函数
-def validate(valData, model, lossF, args, M):
+
+def validate(val_data, model, loss_function, args):
     """
-    valData (DataLoader)
+    验证获取genLoss, 得到验证集的损失
+
+    val_data (DataLoader)
     """
     m0, m1 = model
-    ## switch to evaluation mode
+    # switch to evaluation mode
     m0.eval()
     m1.eval()
 
-    num_iteration = valData.size // args.batch
-    if valData.size % args.batch > 0: num_iteration += 1
+    # 获取验证集迭代的批次数目
+    num_iteration = val_data.size // args.batch
+    if val_data.size % args.batch > 0:
+        num_iteration += 1
 
     total_genloss = 0
-    # for iteration in range(num_iteration):
-    for iteration in tqdm(range(num_iteration),desc="验证检验"):
-        gendata = valData.getbatch_generative()
+
+    for iteration in tqdm(range(num_iteration), desc="验证检验"):
+        # 获取一批验证集数据
+        gen_data = val_data.getbatch_generative()
         with torch.no_grad():
-            genloss = genLoss(gendata, m0, m1, lossF, args)
-            total_genloss += genloss.item() * gendata.trg.size(1)
-    
-    if args.need_rank_val == True:
-        # mean_rank 和rank相关性
-        print("-------------------------------------------")
-        print("验证rank:"+str(time.ctime()))
-        with torch.no_grad():
-            M.m0 = m0
-            ''' test '''
-            # mean_rank = M.get_mean_rank()
-            # print("mean_rank ={}\n".format(mean_rank))
-            # M.mean_ranks_vary_nums()
-            # M.mean_ranks_vary_r1()
-            # M.mean_ranks_vary_r2()
-            
-            # cross_similarity = M.get_cross_similarity()
-            # print("cross_similarity(->0) = {} \n".format(round(cross_similarity,4)))
-            M.show_cs_vary_r1()
-            # M.show_cs_vary_r2()
-            
-            
-            # K = 40
-            # knn_precision = M.get_knn_precision(K)
-            # print("knn_precision(->1) = {} \n".format(knn_precision*100))
-            M.show_knn_vary_r1()
-            # M.show_knn_vary_r2()
-            
-    
-    ## switch back to training mode
+            gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
+            total_genloss += gen_loss.item() * gen_data.trg.size(1)
+    # switch back to training mode
     m0.train()
     m1.train()
-    return total_genloss / valData.size
+    return total_genloss / val_data.size
 
-# 加载数据
-def loadTrainDataAndValidateDate(args):
-    # 加载训练集
-    trainsrc = os.path.join(args.data, "train.src")
-    traintrg = os.path.join(args.data, "train1.trg")
-    trainmta = os.path.join(args.data, "train.mta")
-    trainData = DataLoader(trainsrc, traintrg, trainmta, args.batch, args.bucketsize)
+
+def load_data(args):
+    # 加载训练集，包装到DataLoader中
+    train_src = os.path.join(args.data, "train.src")
+    train_trg = os.path.join(args.data, "train.trg")
+    train_mta = os.path.join(args.data, "train.mta")
+    train_data = DataLoader(train_src, train_trg, train_mta, args.batch, args.bucketsize)
     print("Reading training data...")
-    trainData.load(args.max_num_line)
-    print("Allocation: {}".format(trainData.allocation))
-    print("Percent: {}".format(trainData.p))
+    train_data.load(args.max_num_line)
+    print("Allocation: {}".format(train_data.allocation))
+    print("Percent: {}".format(train_data.p))
 
     # 如果存在验证集，加载验证集
     valsrc = os.path.join(args.data, "val.src")
     valtrg = os.path.join(args.data, "val.trg")
-    valmta = os.path.join(args.data, "val1.mta")
-    valData = 0
+    valmta = os.path.join(args.data, "val.mta")
+    val_data = None
     if os.path.isfile(valsrc) and os.path.isfile(valtrg):
-        valData = DataLoader(valsrc, valtrg, valmta, args.batch, args.bucketsize, True)
+        val_data = DataLoader(valsrc, valtrg, valmta, args.batch, args.bucketsize, True)
         print("Reading validation data...")
-        valData.load(args.read_val_nums)
-        assert valData.size > 0, "Validation data size must be greater than 0"
-        print("Loaded validation data size {}".format(valData.size))
+        val_data.load(args.read_val_nums)
+        assert val_data.size > 0, "Validation data size must be greater than 0"
+        print("Loaded validation data size {}".format(val_data.size))
     else:
         print("No validation data found, training without validating...")
-    return trainData, valData
+    return train_data, val_data
 
-# 创建损失函数
-def setLossF(args):
+
+def set_loss(args):
+    """
+    设置KL散度损失函数
+    
+    :param args:  参数设定
+    :return: 设置的损失函数
+    """
     if args.criterion_name == "NLL":
         criterion = NLLcriterion(args.vocab_size)
-        # 自己添加
         if args.cuda and torch.cuda.is_available():
             criterion.cuda()
-        lossF = lambda o, t: criterion(o, t)
+        loss_function = lambda o, t: criterion(o, t)
     else:
-        assert os.path.isfile(args.knearestvocabs),\
-            "{} does not exist".format(args.knearestvocabs)
+        assert os.path.isfile(args.knearestvocabs), "{} does not exist".format(args.knearestvocabs)
         print("Loading vocab distance file {}...".format(args.knearestvocabs))
         with h5py.File(args.knearestvocabs,'r') as f:
             # VD size = (vocal_size, 10) 第i行为第i个轨迹与其10个邻居
             if args.isToy == True:
-                V, Ds,Dt = f["V"][...], f["Ds"][...],f["Dt"][...]
-                V, Ds,Dt = torch.LongTensor(V), torch.FloatTensor(Ds),torch.FloatTensor(Dt)
+                V, Ds, Dt = f["V"][...], f["Ds"][...], f["Dt"][...]
+                V, Ds, Dt = torch.LongTensor(V), torch.FloatTensor(Ds), torch.FloatTensor(Dt)
                 Ds, Dt = dist2weight(Ds, args.dist_decay_speed),dist2weight(Dt, args.dist_decay_speed)
                 D = (1-args.timeWeight)*Ds + args.timeWeight*Dt
             else:
-                V,D = f["V"][...],f["D"][...]
-                V,D = torch.LongTensor(V), torch.FloatTensor(D)
+                V, D = f["V"][...], f["D"][...]
+                V, D = torch.LongTensor(V), torch.FloatTensor(D)
                 D = dist2weight(D, args.dist_decay_speed)
         if args.cuda and torch.cuda.is_available():
             V, D = V.cuda(), D.cuda()
         criterion = nn.KLDivLoss(reduction='sum')
-        # 自己添加
         if args.cuda and torch.cuda.is_available():
             criterion.cuda()
-        lossF = lambda o, t: KLDIVloss(o, t, criterion, V, D)
-    return lossF
+        loss_function = lambda o, t: KLDIVloss(o, t, criterion, V, D)
+    return loss_function
+
 
 def train(args):
+    """
+    正式的训练过程
+
+    :param args: 参数设定
+    :return: None
+    """
     logging.basicConfig(filename=os.path.join(args.data, "training.log"), level=logging.INFO)
-    trainData, valData = loadTrainDataAndValidateDate(args)
+    train_data, val_data = load_data(args)
     # 创建损失函数，模型以及最优化训练
-    lossF = setLossF(args)
+    loss_function = set_loss(args)
     triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
 
     # 输入到输出整个encoder-decoder的map
-    m0 = EncoderDecoder(args.vocab_size,args.embedding_size,args.hidden_size,args.num_layers, args.dropout, args.bidirectional)
-    #  EncoderDecoder 的输出到词汇表向量的映射，并进行了log操作
-    m1 = nn.Sequential(nn.Linear(args.hidden_size, args.vocab_size),nn.LogSoftmax(dim=1))
+    m0 = EncoderDecoder(args.vocab_size, args.embedding_size, args.hidden_size, args.num_layers, args.dropout, args.bidirectional)
+    #  Encoder到Decoder 的中间输出输出到词汇表向量的映射，并进行了log操作
+    m1 = nn.Sequential(nn.Linear(args.hidden_size, args.vocab_size), nn.LogSoftmax(dim=1))
     if args.cuda and torch.cuda.is_available():
         print("=> training with GPU")
         m0.cuda()
         m1.cuda()
-        # criterion.cuda() 自己更改
-        #m0 = nn.DataParallel(m0, dim=1)
+        #  m0 = nn.DataParallel(m0, dim=1)
     else:
         print("=> training with CPU")
-
     m0_optimizer = torch.optim.Adam(m0.parameters(), lr=args.learning_rate)
     m1_optimizer = torch.optim.Adam(m1.parameters(), lr=args.learning_rate)
 
-    ## 加载模型状态和优化器状态
-    ## 如果存在已经保存的训练状态，如果不存在则重新开始生成
+    # 加载模型状态和优化器状态，如果存在已经保存的训练状态，如果不存在则重新开始生成
     if os.path.isfile(args.checkpoint):
         print("=> loading checkpoint '{}'".format(args.checkpoint))
         logging.info("Restore training @ {}".format(time.ctime()))
         checkpoint = torch.load(args.checkpoint)
         args.start_iteration = checkpoint["iteration"]
-        best_prec_loss = checkpoint["best_prec_loss"]
-        best_mean_rank = checkpoint["best_mean_rank"]
-        best_gen_loss = checkpoint["best_gen_loss"]
+        best_train_gen_loss = checkpoint["best_train_gen_loss"]
+        best_train_dis_loss = checkpoint["best_train_dis_loss"]
+        best_train_loss = checkpoint["best_train_loss"]
+        best_val_loss = checkpoint["best_val_loss"]
         
         m0.load_state_dict(checkpoint["m0"])
         m1.load_state_dict(checkpoint["m1"])
         m0_optimizer.load_state_dict(checkpoint["m0_optimizer"])
         m1_optimizer.load_state_dict(checkpoint["m1_optimizer"])
-        
     else:
         print("=> no checkpoint found at '{}'".format(args.checkpoint))
         logging.info("Start training @ {}".format(time.ctime()))
-        best_prec_loss = float('inf')
-        best_mean_rank = float('inf')
-        best_gen_loss = float("inf")
+        best_train_gen_loss = float('inf')
+        best_train_dis_loss = float('inf')
+        best_train_loss = float('inf')
+        best_val_loss = float('inf')
         print("=> initializing the parameters...")
         init_parameters(m0)
         init_parameters(m1)
-        ## here: load pretrained wrod (cell) embedding
 
-    # num_iteration = 67000*128 // args.batch
     num_iteration = args.iter_num
     print("开始训练："+str(time.ctime()))
     print("Iteration starts at {} and will end at {} \n".format(args.start_iteration, num_iteration-1))
-    
-    
-    '''load val data for precision evaluation'''
-    if args.need_rank_val == True:
-        M = My_criterion(args, 0)
-    else:
-        M = 0
-    
-    # 划分P，Q
-    # Q_size, P_size, r1, r2 = 10000,10000, 0.1, 0
-    # M.dataloader.splitPQ(Q_size, P_size, r1,r2)
-    
-    # # 划分Ta, Tb
-    # trj_num, r1, r2 = 10000, 0.1, 0
-    # M.dataloader.splitTbTa(trj_num, r1, r2)
-    
-    # # 划分query ,database    
-    # num_q, num_db, r1, r2 = 1000,10000,0.1,0
-    # M.dataloader.split_query_db(num_q, num_db, r1, r2)
-    print("Test data loaded")
-    
-    
-    ## training
-    # 用一个计数器 计数 测试集损失 未下降的次数，若超过一定次数，则直接停止训练
-    invalid_count = 0
+    invalid_count = 0  # 用一个计数器计数测试集损失未下降的次数，若超过一定次数，则直接停止训练
     for iteration in range(args.start_iteration+1, num_iteration):
         try:
             # 梯度初始化为0
             m0_optimizer.zero_grad()
             m1_optimizer.zero_grad()
-            ## 前向传播求预测值并计算损失
             # 获取一批补位+转置后的数据对象 TF=['src', 'lengths', 'trg', 'invp']
             # src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
-            gendata = trainData.getbatch_generative()
+            gen_data = train_data.getbatch_generative()
             # 计算损失
-            genloss = genLoss(gendata, m0, m1, lossF, args)
-            ## discriminative loss
-            disloss_cross, disloss_inner = 0, 0
-            # 每args.dis_freq次计算1次discriminative loss
+            train_gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
+            train_dis_cross, train_dis_inner = 0, 0
             if args.use_discriminative and iteration % args.dis_freq == 0:
                 # a和p的轨迹更接近 a.src.size = [max_length,128]
-                a, p, n = trainData.getbatch_discriminative_cross()
-                disloss_cross = disLoss(a, p, n, m0, triplet_loss, args)
+                a, p, n = train_data.getbatch_discriminative_cross()
+                train_dis_cross = disLoss(a, p, n, m0, triplet_loss, args)
                 # a,p,n是由同一组128个轨迹采样得到的新的128个下采样轨迹集合
-                a, p, n = trainData.getbatch_discriminative_inner()
-                disloss_inner = disLoss(a, p, n, m0, triplet_loss, args)
-                # print("计算三元损失："+str(time.ctime()))
-            # 损失按一定权重相加 genloss： 使损失尽可能小 discriminative——loss: 使序列尽可能相似
-            
-            loss = genloss + args.discriminative_w * (disloss_cross + disloss_inner)
-            ## 根据模型损失，计算梯度
-            loss.backward()
-            ## 剪辑梯度，限制梯度下降的阈值，防止梯度消失现象
+                a, p, n = train_data.getbatch_discriminative_inner()
+                train_dis_inner = disLoss(a, p, n, m0, triplet_loss, args)
+            # 损失按一定权重相加 train_gen_loss： 使损失尽可能小 discriminative——loss: 使序列尽可能相似
+            train_loss = train_gen_loss + args.discriminative_w * (train_dis_cross + train_dis_inner)
+            train_loss.backward()
+            # 限制梯度下降的阈值，防止梯度消失现象
             clip_grad_norm_(m0.parameters(), args.max_grad_norm)
             clip_grad_norm_(m1.parameters(), args.max_grad_norm)
-            ## 更新全部参数一次
             m0_optimizer.step()
             m1_optimizer.step()
-            ## 计算一个词的平均损失
-            avg_genloss = genloss.item() / gendata.trg.size(0)
-            ## 定期输出训练状态
+            # 计算一个词的平均损失
+            train_loss = train_loss.item() / gen_data.trg.size(0)
             if iteration % args.print_freq == 0:
-                print ("\n\n当前时间:"+str(time.ctime()))
-                print("Iteration: {0:}\nGenerative Loss: {1:.3f}"\
-                      "\nDiscriminative Cross Loss: {2:.3f}\nDiscriminative Inner Loss: {3:.3f}"\
-                      .format(iteration, avg_genloss, disloss_cross, disloss_inner))
-                print("best_gen_loss= "+str(best_gen_loss))
+                print("\n\n当前时间:"+str(time.ctime()))
+                print("Iteration: {0:}\nTrain Generative Loss: {1:.3f}\nTrain Discriminative Cross Loss: {2:.3f}"
+                      "\nTrain Discriminative Inner Loss: {3:.3f}\nTrain Loss:{3:.3f}"\
+                      .format(iteration, train_gen_loss, train_dis_cross, train_dis_inner, train_loss))
+                print("best_train_loss= "+str(best_train_loss))
+                print("best_train_dis_loss= ", best_train_dis_loss)
                 
-            ## 定期存储训练状态，通过验证集前向计算当前模型损失，若能获得更小损失，则保存最新的模型参数
-            ## 只有训练集模型变好，才进行测试机检验和存储
-            
+            # 定期存储训练状态，通过验证集前向计算当前模型损失，若能获得更小损失，则保存最新的模型参数
+            # 只有训练集模型变好，才进行测试机检验和存储
             if iteration % args.save_freq == 0 and iteration > 0:
                 # 如果训练集能够取得更好的模型，再进一步进行验证集验证
-                if avg_genloss < best_gen_loss:
-                    #验证训练
-                    best_gen_loss = avg_genloss
-                prec_loss = validate(valData, (m0, m1), lossF, args, M)
-                
-                if prec_loss < best_prec_loss:
-                    best_prec_loss = prec_loss
+                if train_loss > best_train_loss:
+                    continue
+                best_train_loss = train_loss
+                if train_gen_loss < best_train_gen_loss:
+                    best_train_gen_loss = best_train_loss
+                train_dis_loss = train_dis_cross + train_dis_inner
+                if train_dis_loss < best_train_dis_loss:
+                    best_train_dis_loss = train_dis_loss
+
+                val_loss = validate(val_data, (m0, m1), loss_function, args)
+                # 如果验证集也能取得更小的
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
                     invalid_count = 0
-                    logging.info("Best model with loss {} at iteration {} @ {}"\
-                                 .format(best_prec_loss, iteration, time.ctime()))
+                    logging.info("Best model with loss {} at iteration {} @ {}".format(best_val_loss, iteration, time.ctime()))
                     is_best = True
                 else:
                     is_best = False
                     invalid_count += 1
-                    if(invalid_count>=3):
-                        print("训练不能再减少损失，停止训练")
+                    if invalid_count > 30:
+                        print("多次训练不能再减少损失，停止训练")
                         break
                 if is_best:
-                    print("Saving the model at iteration {} validation loss {}".format(iteration, prec_loss))
-                    savecheckpoint({
+                    print("Saving the model at iteration {} validation loss {}".format(iteration, val_loss))
+                    save_checkpoint({
                         "iteration": iteration,
-                        "best_prec_loss": best_prec_loss,
+                        "best_train_gen_loss": best_train_gen_loss,
+                        "best_train_dis_loss": best_train_dis_loss,
+                        "best_train_loss": best_train_loss,
+                        "best_val_loss": best_val_loss,
                         "m0": m0.state_dict(),
                         "m1": m1.state_dict(),
                         "m0_optimizer": m0_optimizer.state_dict(),
                         "m1_optimizer": m1_optimizer.state_dict(),
-                        "best_mean_rank":best_mean_rank,
-                        "best_gen_loss":best_gen_loss
                     }, is_best, args)
-            # else:
-            #     invalid_count += 1
-            #     if(invalid_count>=100):
-            #         print("训练不能再减少损失，停止训练")
-            #         break
-            
         except KeyboardInterrupt:
             break

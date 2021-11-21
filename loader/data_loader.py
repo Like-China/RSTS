@@ -5,75 +5,85 @@
 from funcy import merge
 from loader.data_utils import *
 from tqdm import tqdm
+import settings
 
 
-class DataLoader():
+class DataLoader:
     """
     srcfile: source file name
-    trgfile: target file name
+    trg_file: target file name
     batch: batch size
     validate: if validate = True return batch orderly otherwise return batch randomly
     """
-    def __init__(self, srcfile, trgfile, mtafile, batch, bucketsize, validate=False):
+    def __init__(self, srcfile, trg_file, mta_file, batch, bucket_size, validate=False):
         self.srcfile = srcfile
-        self.trgfile = trgfile
-        self.mtafile = mtafile
-
+        self.trg_file = trg_file
+        self.mta_file = mta_file
         self.batch = batch
         self.validate = validate
-        self.bucketsize = bucketsize
+        self.bucket_size = bucket_size
+        # 记录轨迹信息
+        self.src_data = []
+        self.trg_data = []
+        self.mta_data = []
+        self.allocation = []
+        self.p = []
+        # 用于批次获取测试集
+        self.start = 0
+        self.size = 0
 
     # 插入8组不同的轨迹长度范围的轨迹到轨迹中，对于每一条src轨迹和目标轨迹，判断它们的长度并加入到到对应列表中
     def insert(self, s, t, m):
-        for i in range(len(self.bucketsize)):
-            if len(s) <= self.bucketsize[i][0] and len(t) <= self.bucketsize[i][1]:
-                self.srcdata[i].append(np.array(s, dtype=np.int32))
-                self.trgdata[i].append(np.array(t, dtype=np.int32))
-                self.mtadata[i].append(np.array(m, dtype=np.float32))
+        for i in range(len(self.bucket_size)):
+            if len(s) <= self.bucket_size[i][0] and len(t) <= self.bucket_size[i][1]:
+                self.src_data[i].append(np.array(s, dtype=np.int32))
+                self.trg_data[i].append(np.array(t, dtype=np.int32))
+                self.mta_data[i].append(np.array(m, dtype=np.float32))
                 return 1
         return 0
 
     # 加载固定数目的轨迹
     def load(self, max_num_line=0):
-        self.srcdata = [[] for _ in range(len(self.bucketsize))]
-        self.trgdata = [[] for _ in range(len(self.bucketsize))]
-        self.mtadata = [[] for _ in range(len(self.bucketsize))]
+        self.src_data = [[] for _ in range(len(self.bucket_size))]
+        self.trg_data = [[] for _ in range(len(self.bucket_size))]
+        self.mta_data = [[] for _ in range(len(self.bucket_size))]
 
-        srcstream, trgstream, mtastream = open(self.srcfile, 'r'), open(self.trgfile, 'r'), open(self.mtafile, 'r')
+        src_stream, trg_stream, mta_stream = open(self.srcfile, 'r'), open(self.trg_file, 'r'), open(self.mta_file, 'r')
         num_line = 0
         with tqdm(total=max_num_line, desc='Reading Traj', leave=True, ncols=100, unit='B', unit_scale=True) as pbar:
-            for (s, t, m) in zip(srcstream, trgstream, mtastream):
+            for (s, t, m) in zip(src_stream, trg_stream, mta_stream):
                 s = [int(x) for x in s.split()]
-                t = [constants.BOS] + [int(x) for x in t.split()] + [constants.EOS]
+                t = [settings.BOS] + [int(x) for x in t.split()] + [settings.EOS]
                 m = [float(x) for x in m.split()]
-                if len(s)>0:
+                if len(s) > 0:
                     num_line += self.insert(s, t, m)
                 pbar.update(1)
-                if num_line >= max_num_line and max_num_line > 0: break
-        # if vliadate is True we merge all buckets into one
-        if self.validate == True:
-            self.srcdata = np.array(merge(*self.srcdata))
-            self.trgdata = np.array(merge(*self.trgdata))
-            self.mtadata = np.array(merge(*self.mtadata))
+                if num_line >= max_num_line > 0:
+                    break
+        # if validate  we merge all buckets into one
+        if self.validate:
+            self.src_data = np.array(merge(*self.src_data))
+            self.trg_data = np.array(merge(*self.trg_data))
+            self.mta_data = np.array(merge(*self.mta_data))
             self.start = 0
-            self.size = len(self.srcdata)
+            self.size = len(self.src_data)
         else:
-            self.srcdata = list(map(np.array, self.srcdata))
-            self.trgdata = list(map(np.array, self.trgdata))
-            self.mtadata = list(map(np.array, self.mtadata))
-            self.allocation = list(map(len, self.srcdata))
+            self.src_data = list(map(np.array, self.src_data))
+            self.trg_data = list(map(np.array, self.trg_data))
+            self.mta_data = list(map(np.array, self.mta_data))
+            self.allocation = list(map(len, self.src_data))
             self.p = np.array(self.allocation) / sum(self.allocation)
-        srcstream.close(), trgstream.close(), mtastream.close()
+        src_stream.close(), trg_stream.close(), mta_stream.close()
 
-    def getbatch_one(self):
+    def get_batch(self):
         """
         加载一批轨迹，验证集有序加载，训练集随机加载
         :return:
         """
         if self.validate:
-            src = self.srcdata[self.start:self.start+self.batch]
-            trg = self.trgdata[self.start:self.start+self.batch]
-            mta = self.mtadata[self.start:self.start+self.batch]
+            src = self.src_data[self.start:self.start+self.batch]
+            trg = self.trg_data[self.start:self.start+self.batch]
+            mta = self.mta_data[self.start:self.start+self.batch]
             # update `start` for next batch
             self.start += self.batch
             if self.start >= self.size:
@@ -84,23 +94,23 @@ class DataLoader():
             sample = np.random.multinomial(1, self.p)
             bucket = np.nonzero(sample)[0][0]
             # select data from the bucket
-            idx = np.random.choice(len(self.srcdata[bucket]), self.batch)
-            src = self.srcdata[bucket][idx]
-            trg = self.trgdata[bucket][idx]
-            mta = self.mtadata[bucket][idx]
+            idx = np.random.choice(len(self.src_data[bucket]), self.batch)
+            src = self.src_data[bucket][idx]
+            trg = self.trg_data[bucket][idx]
+            mta = self.mta_data[bucket][idx]
             return list(src), list(trg), list(mta)
 
-    def getbatch_generative(self):
+    def get_batch_generative(self):
         """
         返回一组batch个数的 TF对象，排序加补位操作
 
         :return: ['src', 'lengths', 'trg', 'invp']
         """
-        src, trg, _ = self.getbatch_one()
+        src, trg, _ = self.get_batch()
         # src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
         return pad_arrays_pair(src, trg, keep_invp=False)
 
-    def getbatch_discriminative_cross(self):
+    def get_apn_cross(self):
         """
         得到三个batch个数的轨迹集，a,p，n
         a中的轨迹中心更接近于p中的轨迹
@@ -113,8 +123,8 @@ class DataLoader():
         p_src, p_trg, p_mta = self.getbatch_one()
         n_src, n_trg, n_mta = self.getbatch_one()
 
-        #p_src, p_trg, p_mta = copy.deepcopy(p_src), copy.deepcopy(p_trg), copy.deepcopy(p_mta)
-        #n_src, n_trg, n_mta = copy.deepcopy(n_src), copy.deepcopy(n_trg), copy.deepcopy(n_mta)
+        #  p_src, p_trg, p_mta = copy.deepcopy(p_src), copy.deepcopy(p_trg), copy.deepcopy(p_mta)
+        #  n_src, n_trg, n_mta = copy.deepcopy(n_src), copy.deepcopy(n_trg), copy.deepcopy(n_mta)
         for i in range(len(a_src)):
             # a_mta[i] float32[] [id, t]
             # 如果a,p两个轨迹距离更大，则将p中的轨迹换为n的轨迹
@@ -128,7 +138,7 @@ class DataLoader():
         n = pad_arrays_pair(n_src, n_trg, keep_invp=True)
         return a, p, n
 
-    def getbatch_discriminative_inner(self):
+    def get_apn_inner(self):
         """
         以一定概率去除一批batch个数轨迹中的点后生成三个轨迹集合a, p，n
 
@@ -157,18 +167,18 @@ class DataLoader():
             rate = np.random.choice([0.5, 0.6, 0.8])
             if np.random.rand() > 0.5:
                 a_src.append(random_subseq(trg[a1:a4], rate))
-                a_trg.append(np.r_[constants.BOS, trg[a1:a4], constants.EOS])
+                a_trg.append(np.r_[settings.BOS, trg[a1:a4], settings.EOS])
                 p_src.append(random_subseq(trg[a2:a5], rate))
-                p_trg.append(np.r_[constants.BOS, trg[a2:a5], constants.EOS])
+                p_trg.append(np.r_[settings.BOS, trg[a2:a5], settings.EOS])
                 n_src.append(random_subseq(trg[a3:a5], rate))
-                n_trg.append(np.r_[constants.BOS, trg[a3:a5], constants.EOS])
+                n_trg.append(np.r_[settings.BOS, trg[a3:a5], settings.EOS])
             else:
                 a_src.append(random_subseq(trg[a2:a5], rate))
-                a_trg.append(np.r_[constants.BOS, trg[a2:a5], constants.EOS])
+                a_trg.append(np.r_[settings.BOS, trg[a2:a5], settings.EOS])
                 p_src.append(random_subseq(trg[a1:a4], rate))
-                p_trg.append(np.r_[constants.BOS, trg[a1:a4], constants.EOS])
+                p_trg.append(np.r_[settings.BOS, trg[a1:a4], settings.EOS])
                 n_src.append(random_subseq(trg[a1:a3], rate))
-                n_trg.append(np.r_[constants.BOS, trg[a1:a3], constants.EOS])
+                n_trg.append(np.r_[settings.BOS, trg[a1:a3], settings.EOS])
         a = pad_arrays_pair(a_src, a_trg, keep_invp=True)
         p = pad_arrays_pair(p_src, p_trg, keep_invp=True)
         n = pad_arrays_pair(n_src, n_trg, keep_invp=True)

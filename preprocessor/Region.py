@@ -13,8 +13,8 @@ import random, h5py, os, warnings, gc, time, argparse
 from tqdm import tqdm
 import numpy as np
 from scipy import spatial
-import args as AG
-from args import set_args
+import settings as AG
+from settings import set_args
 warnings.filterwarnings("ignore")
 
 

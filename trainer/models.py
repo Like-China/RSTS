@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_packed_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
 import os
-import args
+import settings
 
 """
 模型框架
@@ -11,6 +11,7 @@ StackingGRUCell(nn.Module)
 GlobalAttention(nn.Module)
 Encoder(nn.Module)
 Decoder(nn.Module)
+EncoderDecoder(nn.Module)
 """
 
 
@@ -172,6 +173,7 @@ class Decoder(nn.Module):
         output = torch.stack(output)
         return output, h
 
+
 class EncoderDecoder(nn.Module):
     # 输入向量的特征维度 input_size= args.vocab_size = 18864
     # 隐藏层 向量维度 hidden_size= embedding_size= 256
@@ -184,8 +186,7 @@ class EncoderDecoder(nn.Module):
         super(EncoderDecoder, self).__init__()
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
-        self.embedding = nn.Embedding(vocab_size, embedding_size,
-                                      padding_idx=constants.PAD)
+        self.embedding = nn.Embedding(vocab_size, embedding_size, padding_idx=settings.PAD)
         self.encoder = Encoder(embedding_size, hidden_size, num_layers,
                                dropout, bidirectional, self.embedding)
         self.decoder = Decoder(embedding_size, hidden_size, num_layers,
@@ -230,5 +231,4 @@ class EncoderDecoder(nn.Module):
         decoder_h0 = self.encoder_hn2decoder_h0(encoder_hn)
         ## target去除EOS行后调入decoder
         output, decoder_hn = self.decoder(trg[:-1], decoder_h0, H)
-        ''' test '''
         return output
