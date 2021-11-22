@@ -506,7 +506,7 @@ class Region:
     def trip2words(self, trip,ts):
         ''' 减少迭代次数的trip2words '''
         words = []
-        for (lon,lat), t in zip(trip,ts):
+        for (lon, lat), t in zip(trip, ts):
             space_id = self.gps2spaceId(lon, lat)
             t = int(t) // self.args.time_span
             map_id = self.spaceId2mapId(space_id, t)

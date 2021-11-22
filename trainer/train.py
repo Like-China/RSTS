@@ -158,7 +158,7 @@ def validate(val_data, model, loss_function, args):
 
     for iteration in tqdm(range(num_iteration), desc="验证检验"):
         # 获取一批验证集数据
-        gen_data = val_data.getbatch_generative()
+        gen_data = val_data.get_batch_generative()
         with torch.no_grad():
             gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
             total_genloss += gen_loss.item() * gen_data.trg.size(1)
@@ -175,7 +175,7 @@ def load_data(args):
     train_mta = os.path.join(args.data, "train.mta")
     train_data = DataLoader(train_src, train_trg, train_mta, args.batch, args.bucketsize)
     print("Reading training data...")
-    train_data.load(args.max_num_line)
+    train_data.load(args.read_train_num)
     print("Allocation: {}".format(train_data.allocation))
     print("Percent: {}".format(train_data.p))
 
@@ -187,7 +187,7 @@ def load_data(args):
     if os.path.isfile(valsrc) and os.path.isfile(valtrg):
         val_data = DataLoader(valsrc, valtrg, valmta, args.batch, args.bucketsize, True)
         print("Reading validation data...")
-        val_data.load(args.read_val_nums)
+        val_data.load(args.read_val_num)
         assert val_data.size > 0, "Validation data size must be greater than 0"
         print("Loaded validation data size {}".format(val_data.size))
     else:
@@ -209,18 +209,13 @@ def set_loss(args):
         loss_function = lambda o, t: criterion(o, t)
     else:
         assert os.path.isfile(args.knearestvocabs), "{} does not exist".format(args.knearestvocabs)
-        print("Loading vocab distance file {}...".format(args.knearestvocabs))
-        with h5py.File(args.knearestvocabs,'r') as f:
+        print("Loading vocab distance file {}...".format(args.knn_vocabs))
+        with h5py.File(args.knn_vocabs, 'r') as f:
             # VD size = (vocal_size, 10) 第i行为第i个轨迹与其10个邻居
-            if args.isToy == True:
-                V, Ds, Dt = f["V"][...], f["Ds"][...], f["Dt"][...]
-                V, Ds, Dt = torch.LongTensor(V), torch.FloatTensor(Ds), torch.FloatTensor(Dt)
-                Ds, Dt = dist2weight(Ds, args.dist_decay_speed),dist2weight(Dt, args.dist_decay_speed)
-                D = (1-args.timeWeight)*Ds + args.timeWeight*Dt
-            else:
-                V, D = f["V"][...], f["D"][...]
-                V, D = torch.LongTensor(V), torch.FloatTensor(D)
-                D = dist2weight(D, args.dist_decay_speed)
+            V, Ds, Dt = f["V"][...], f["Ds"][...], f["Dt"][...]
+            V, Ds, Dt = torch.LongTensor(V), torch.FloatTensor(Ds), torch.FloatTensor(Dt)
+            Ds, Dt = dist2weight(Ds, args.dist_decay_speed),dist2weight(Dt, args.dist_decay_speed)
+            D = (1-args.timeWeight)*Ds + args.timeWeight*Dt
         if args.cuda and torch.cuda.is_available():
             V, D = V.cuda(), D.cuda()
         criterion = nn.KLDivLoss(reduction='sum')
@@ -283,7 +278,7 @@ def train(args):
         init_parameters(m0)
         init_parameters(m1)
 
-    num_iteration = args.iter_num
+    num_iteration = args.iter_num*args.epochs
     print("开始训练："+str(time.ctime()))
     print("Iteration starts at {} and will end at {} \n".format(args.start_iteration, num_iteration-1))
     invalid_count = 0  # 用一个计数器计数测试集损失未下降的次数，若超过一定次数，则直接停止训练
@@ -294,16 +289,16 @@ def train(args):
             m1_optimizer.zero_grad()
             # 获取一批补位+转置后的数据对象 TF=['src', 'lengths', 'trg', 'invp']
             # src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
-            gen_data = train_data.getbatch_generative()
+            gen_data = train_data.get_batch_generative()
             # 计算损失
             train_gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
             train_dis_cross, train_dis_inner = 0, 0
             if args.use_discriminative and iteration % args.dis_freq == 0:
                 # a和p的轨迹更接近 a.src.size = [max_length,128]
-                a, p, n = train_data.getbatch_discriminative_cross()
+                a, p, n = train_data.get_apn_cross()
                 train_dis_cross = disLoss(a, p, n, m0, triplet_loss, args)
                 # a,p,n是由同一组128个轨迹采样得到的新的128个下采样轨迹集合
-                a, p, n = train_data.getbatch_discriminative_inner()
+                a, p, n = train_data.get_apn_inner()
                 train_dis_inner = disLoss(a, p, n, m0, triplet_loss, args)
             # 损失按一定权重相加 train_gen_loss： 使损失尽可能小 discriminative——loss: 使序列尽可能相似
             train_loss = train_gen_loss + args.discriminative_w * (train_dis_cross + train_dis_inner)
@@ -316,7 +311,7 @@ def train(args):
             # 计算一个词的平均损失
             train_loss = train_loss.item() / gen_data.trg.size(0)
             if iteration % args.print_freq == 0:
-                print("\n\n当前时间:"+str(time.ctime()))
+                print("\n\ncurrent time:"+str(time.ctime()))
                 print("Iteration: {0:}\nTrain Generative Loss: {1:.3f}\nTrain Discriminative Cross Loss: {2:.3f}"
                       "\nTrain Discriminative Inner Loss: {3:.3f}\nTrain Loss:{3:.3f}"\
                       .format(iteration, train_gen_loss, train_dis_cross, train_dis_inner, train_loss))
@@ -337,6 +332,7 @@ def train(args):
                     best_train_dis_loss = train_dis_loss
 
                 val_loss = validate(val_data, (m0, m1), loss_function, args)
+                print("验证集损失: ", val_loss)
                 # 如果验证集也能取得更小的
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss

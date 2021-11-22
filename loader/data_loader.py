@@ -119,9 +119,9 @@ class DataLoader:
         def distance(x, y):
             return np.linalg.norm(x[0:2]-y[0:2])
             # return 0.5*np.linalg.norm(x[:2] - y[:2])+ (x[2:3] - y[2:3])*0.5/24
-        a_src, a_trg, a_mta = self.getbatch_one()
-        p_src, p_trg, p_mta = self.getbatch_one()
-        n_src, n_trg, n_mta = self.getbatch_one()
+        a_src, a_trg, a_mta = self.get_batch()
+        p_src, p_trg, p_mta = self.get_batch()
+        n_src, n_trg, n_mta = self.get_batch()
 
         #  p_src, p_trg, p_mta = copy.deepcopy(p_src), copy.deepcopy(p_trg), copy.deepcopy(p_mta)
         #  n_src, n_trg, n_mta = copy.deepcopy(n_src), copy.deepcopy(n_trg), copy.deepcopy(n_mta)
@@ -158,7 +158,7 @@ class DataLoader:
         p_src, p_trg = [], []
         n_src, n_trg = [], []
 
-        _, trgs, _ = self.getbatch_one()
+        _, trgs, _ = self.get_batch()
         for i in range(len(trgs)):
             trg = trgs[i][1:-1]
             if len(trg) < 10: continue
