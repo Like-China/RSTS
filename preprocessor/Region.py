@@ -1,12 +1,12 @@
 """
 通过对空间和时间进行划分，将每个轨迹点转化为token值
 通过读取h5文件中的轨迹，写出
-./data/cityname/cityname_regionScale_timeScale/train.src
-./data/cityname/cityname_regionScale_timeScale/train1.trg
-./data/cityname/cityname_regionScale_timeScale/train.mtc
-./data/cityname/cityname_regionScale_timeScale/val.src
-./data/cityname/cityname_regionScale_timeScale/val.trg
-./data/cityname/cityname_regionScale_timeScale/val.mtc
+./data/city_name/cityname_regionScale_timeScale/train.src
+./data/city_name/cityname_regionScale_timeScale/train1.trg
+./data/city_name/cityname_regionScale_timeScale/train.mtc
+./data/city_name/cityname_regionScale_timeScale/val.src
+./data/city_name/cityname_regionScale_timeScale/val.trg
+./data/city_name/cityname_regionScale_timeScale/val.mtc
 """
 # -*- coding: utf-8 -*-
 import random, h5py, os, warnings, gc, time, argparse
@@ -25,11 +25,11 @@ def setRegionArgs():
     :param args: 全局参数
     :return: 设置的空间和时间划分参数
     """
-    args = set_args()
+    args = set_args(is_train=False)
     parser = argparse.ArgumentParser(description="Region.py")
-    parser.add_argument("-cityname", default=args.cityname, help="城市名")
+    parser.add_argument("-city_name", default=args.city_name, help="城市名")
 
-    if args.cityname == "beijing":
+    if args.city_name == "beijing":
         lons_range = [116.25, 116.55]
         lats_range = [39.83, 40.03]
     else:
@@ -80,15 +80,15 @@ class Region:
          
         self.args = setRegionArgs()
         # 结果数据文件存放路径 ,存储src,trg, mta的文件路径../data/porto/..
-        self.save_path = os.path.join('../data',self.args.cityname, self.args.cityname+str(int(self.args.scale*100000))+str(self.args.time_size))
+        self.save_path = os.path.join('../../data', self.args.city_name, self.args.city_name+str(int(self.args.scale*100000))+str(self.args.time_size))
         if not os.path.exists(self.save_path):
             os.makedirs(self.save_path)
         # 读取轨迹 h5文件路径  E://data/porto.h5
-        self.h5path = os.path.join('E://data', self.args.cityname+".h5")
+        self.h5path = os.path.join('E://data', self.args.city_name+".h5")
         # 读取的最大轨迹数目
-        self.max_trjs_num = 100000
+        self.max_trjs_num = 10000000
         # 输出V，Ds,Dt 的 path ./data/porto_dist.h5
-        self.VDpath = os.path.join(self.save_path, self.args.cityname+"_dist.h5")
+        self.VDpath = os.path.join(self.save_path, self.args.city_name+"_dist.h5")
         # 下采样率+产生噪声的概率
         self.dropping_rates = [0, 0.2, 0.4, 0.6]
         self.distorting_rates = [0, 0.2, 0.4, 0.6]
@@ -306,7 +306,7 @@ class Region:
         # 划分训练集和测试集
         f = h5py.File(self.h5path, 'r')
         # 写出测试集的下采样+噪声偏移后的轨迹位置+时间戳信息文本
-        path = os.path.join(self.save_path, self.args.cityname + "_trj.h5")
+        path = os.path.join(self.save_path, self.args.city_name + "_trj.h5")
         f1 = h5py.File(path, 'w')
         trj_nums = min(self.max_trjs_num, f.attrs['num'])
         train_num = int(train_ratio * trj_nums)

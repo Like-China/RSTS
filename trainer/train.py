@@ -7,7 +7,7 @@ import settings, time, os, shutil, logging, h5py
 from tqdm import tqdm
 
 
-def NLLcriterion(vocab_size):
+def nll_criterion(vocab_size):
     """
     带权的NLLLoss损失函数， 将编码为0的填充位置的权重置为0
     :param vocab_size:
@@ -20,7 +20,7 @@ def NLLcriterion(vocab_size):
     return criterion
 
 
-def KLDIVloss(output, target, criterion, V, D):
+def kl_criterion(output, target, criterion, V, D):
     """
     output (batch, vocab_size)  128*18866
     target (batch,)  128*1
@@ -133,7 +133,6 @@ def init_parameters(model):
 
 def save_checkpoint(state, is_best, args):
     torch.save(state, args.checkpoint)
-    # 如果当前状态是最好状态，则替换最好状态文件
     if is_best:
         shutil.copyfile(args.checkpoint, os.path.join(args.data, 'best_model.pt'))
 
@@ -155,7 +154,6 @@ def validate(val_data, model, loss_function, args):
         num_iteration += 1
 
     total_genloss = 0
-
     for iteration in tqdm(range(num_iteration), desc="验证检验"):
         # 获取一批验证集数据
         gen_data = val_data.get_batch_generative()
@@ -203,12 +201,12 @@ def set_loss(args):
     :return: 设置的损失函数
     """
     if args.criterion_name == "NLL":
-        criterion = NLLcriterion(args.vocab_size)
+        criterion = nll_criterion(args.vocab_size)
         if args.cuda and torch.cuda.is_available():
             criterion.cuda()
-        loss_function = lambda o, t: criterion(o, t)
+        return lambda o, t: criterion(o, t)
     else:
-        assert os.path.isfile(args.knearestvocabs), "{} does not exist".format(args.knearestvocabs)
+        assert os.path.isfile(args.knn_vocabs), "{} does not exist".format(args.knn_vocabs)
         print("Loading vocab distance file {}...".format(args.knn_vocabs))
         with h5py.File(args.knn_vocabs, 'r') as f:
             # VD size = (vocal_size, 10) 第i行为第i个轨迹与其10个邻居
@@ -221,8 +219,7 @@ def set_loss(args):
         criterion = nn.KLDivLoss(reduction='sum')
         if args.cuda and torch.cuda.is_available():
             criterion.cuda()
-        loss_function = lambda o, t: KLDIVloss(o, t, criterion, V, D)
-    return loss_function
+        return lambda o, t: kl_criterion(o, t, criterion, V, D)
 
 
 def train(args):
@@ -301,22 +298,23 @@ def train(args):
                 a, p, n = train_data.get_apn_inner()
                 train_dis_inner = disLoss(a, p, n, m0, triplet_loss, args)
             # 损失按一定权重相加 train_gen_loss： 使损失尽可能小 discriminative——loss: 使序列尽可能相似
-            train_loss = train_gen_loss + args.discriminative_w * (train_dis_cross + train_dis_inner)
+            # 计算词的平均损失
+            train_gen_loss = train_gen_loss / gen_data.trg.size(0)
+            train_loss = (1-args.discriminative_w)*train_gen_loss + args.discriminative_w * (train_dis_cross + train_dis_inner)
             train_loss.backward()
             # 限制梯度下降的阈值，防止梯度消失现象
             clip_grad_norm_(m0.parameters(), args.max_grad_norm)
             clip_grad_norm_(m1.parameters(), args.max_grad_norm)
             m0_optimizer.step()
             m1_optimizer.step()
-            # 计算一个词的平均损失
-            train_loss = train_loss.item() / gen_data.trg.size(0)
             if iteration % args.print_freq == 0:
                 print("\n\ncurrent time:"+str(time.ctime()))
                 print("Iteration: {0:}\nTrain Generative Loss: {1:.3f}\nTrain Discriminative Cross Loss: {2:.3f}"
-                      "\nTrain Discriminative Inner Loss: {3:.3f}\nTrain Loss:{3:.3f}"\
+                      "\nTrain Discriminative Inner Loss: {3:.3f}\nTrain Loss: {4:.3f}"\
                       .format(iteration, train_gen_loss, train_dis_cross, train_dis_inner, train_loss))
-                print("best_train_loss= "+str(best_train_loss))
-                print("best_train_dis_loss= ", best_train_dis_loss)
+                print("best_train_loss: %.3f" % best_train_loss)
+                print("best_train_dis_loss: %.3f" % best_train_dis_loss)
+                print("best_val_loss: %.3f" % best_val_loss)
                 
             # 定期存储训练状态，通过验证集前向计算当前模型损失，若能获得更小损失，则保存最新的模型参数
             # 只有训练集模型变好，才进行测试机检验和存储
@@ -324,17 +322,10 @@ def train(args):
                 # 如果训练集能够取得更好的模型，再进一步进行验证集验证
                 if train_loss > best_train_loss:
                     continue
-                best_train_loss = train_loss
-                if train_gen_loss < best_train_gen_loss:
-                    best_train_gen_loss = best_train_loss
-                train_dis_loss = train_dis_cross + train_dis_inner
-                if train_dis_loss < best_train_dis_loss:
-                    best_train_dis_loss = train_dis_loss
-
                 val_loss = validate(val_data, (m0, m1), loss_function, args)
-                print("验证集损失: ", val_loss)
+                print("current validate loss: ", val_loss)
                 # 如果验证集也能取得更小的
-                if val_loss < best_val_loss:
+                if val_loss <= best_val_loss:
                     best_val_loss = val_loss
                     invalid_count = 0
                     logging.info("Best model with loss {} at iteration {} @ {}".format(best_val_loss, iteration, time.ctime()))
@@ -346,6 +337,14 @@ def train(args):
                         print("多次训练不能再减少损失，停止训练")
                         break
                 if is_best:
+                    # 更新训练集的损失
+                    best_train_loss = train_loss.item()
+                    if train_gen_loss < best_train_gen_loss:
+                        best_train_gen_loss = best_train_loss
+                    train_dis_loss = train_dis_cross + train_dis_inner
+                    train_dis_loss = train_dis_loss.item()
+                    if train_dis_loss < best_train_dis_loss:
+                        best_train_dis_loss = train_dis_loss
                     print("Saving the model at iteration {} validation loss {}".format(iteration, val_loss))
                     save_checkpoint({
                         "iteration": iteration,
