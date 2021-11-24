@@ -11,6 +11,7 @@ class DataOrderScaner():
         self.batch = batch
         self.srcdata = []
         self.start = 0
+        self.size = 0
 
     def load(self, max_num_line=0):
         num_line = 0

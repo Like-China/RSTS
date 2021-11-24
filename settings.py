@@ -7,10 +7,13 @@ PAD = 0
 BOS = 1
 EOS = 2
 UNK = 3
-city_code = 2
+city_code = 10
+# 限制轨迹最大最小长度
+min_len = 20
+max_len = 100
 city_name = "beijing" if city_code == 1 else "porto"
 scale = 0.002
-time_size = 400
+time_size = 500
 """
 参数设定
 """
@@ -23,6 +26,7 @@ def set_args(is_train=True):
         with h5py.File(dist_path, "r") as f:
             v = f["V"][...]
         vocal_size = len(v)
+        print("词汇表个数: ", vocal_size)
     else:
         vocal_size = 0
 
@@ -32,8 +36,8 @@ def set_args(is_train=True):
     训练数据参数
     *************************************************************************
     '''
-    parser.add_argument("-read_train_num", type=int, default=8000000, help='读取训练集大小')
-    parser.add_argument("-read_val_num", type=int, default=2000000, help="读取的验证集大小")
+    parser.add_argument("-read_train_num", type=int, default=30000000, help='读取训练集大小')
+    parser.add_argument("-read_val_num", type=int, default=20000000, help="读取的验证集大小")
     parser.add_argument("-iter_num", default=3000000, help="总的训练迭代次数")
     parser.add_argument("-max_length", default=200, help="The maximum length of the target sequence")
     parser.add_argument("-bucketsize", default=[(30, 50), (50, 70), (80, 100)], help="Bucket size for training")
@@ -50,7 +54,7 @@ def set_args(is_train=True):
     parser.add_argument("-checkpoint", default=os.path.join('../data', city_name, city_name + str(int(scale * 100000)) +
                                                             str(time_size), 'checkpoint.pt'), help="checkpoint存放目录")
     parser.add_argument("-knn_vocabs", default=dist_path, help="dist VD存放目录")
-    parser.add_argument("-hot_freq", type=int, default=20, help="hot cell frequency, 计数出现这么多次认为是热度词")
+    parser.add_argument("-hot_freq", type=int, default=30, help="hot cell frequency, 计数出现这么多次认为是热度词")
     '''
     *************************************************************************
     神经网络层参数
@@ -70,7 +74,8 @@ def set_args(is_train=True):
     parser.add_argument("-dropout", type=float, default=0.2, help="The dropout probability")
     parser.add_argument("-max_grad_norm", type=float, default=5.0, help="The maximum gradient norm")
     parser.add_argument("-learning_rate", type=float, default=0.001)
-    parser.add_argument("-batch", type=int, default=120, help="The batch size")
+    # beijing batch=120 3090拉满  porto 100拉满
+    parser.add_argument("-batch", type=int, default=60, help="The batch size")
     parser.add_argument("-generator_batch", type=int, default=128, help="每次生成多少个词，消耗内存")
     parser.add_argument("-t2vec_batch", type=int, default=256, help="每一批最大编码轨迹数目")
     parser.add_argument("-start_iteration", type=int, default=0)

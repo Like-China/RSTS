@@ -13,7 +13,7 @@ import random, h5py, os, warnings, gc, time, argparse
 from tqdm import tqdm
 import numpy as np
 from scipy import spatial
-import settings as AG
+import settings
 from settings import set_args
 warnings.filterwarnings("ignore")
 
@@ -60,7 +60,7 @@ def setRegionArgs():
 
     ''' 时空格子参数 '''
     hot_freq = args.hot_freq
-    start = AG.UNK+1
+    start = settings.UNK+1
     parser.add_argument("-hot_freq", type = int, default = hot_freq, help="热度词频率")
     parser.add_argument("-start", type = int, default = start, help="vocal word编码从4开始编号，0，1，2，3有特殊作用")
     parser.add_argument("-space_nn_nums", type = int, default = 20, help="编码一个时空格子时，空间上的近邻筛选个数， 用于生成V, D")
@@ -86,27 +86,27 @@ class Region:
         # 读取轨迹 h5文件路径  E://data/porto.h5
         self.h5path = os.path.join('E://data', self.args.city_name+".h5")
         # 读取的最大轨迹数目
-        self.max_trjs_num = 10000000
+        self.max_trjs_num = 200000000000
         # 输出V，Ds,Dt 的 path ./data/porto_dist.h5
-        self.VDpath = os.path.join(self.save_path, self.args.city_name+"_dist.h5")
+        self.VDpath = os.path.join(self.save_path, "dist.h5")
         # 下采样率+产生噪声的概率
-        self.dropping_rates = [0, 0.2, 0.4, 0.6]
-        self.distorting_rates = [0, 0.2, 0.4, 0.6]
+        self.dropping_rates = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        self.distorting_rates = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
         # 记录 map_id 到 热度词 的 nn 映射
         self.mapId2nnword = {}
         # 空间top-k邻居选取数， 用于为不属于热度词中的mapID选择一个可以替换的最近热度词邻居
         self.space_nn_topK = 20
         # 低频词编码
-        self.UNK = AG.UNK
+        self.UNK = settings.UNK
         print("参数设置：", self.args)
 
     def run(self):
         print("创建词汇表, 获得热度词映射")
         self.create_vocal()
         print("使用利用热度词经纬度构建的Kdtree+ 热度词的时间段, 计算所有热度词的经纬度，构建每个热度词在时空上的近邻V,D")
-        self.get_VD()
+        self.create_dist()
         # 输出训练集和测试集
-        self.createTrainVal()
+        self.create_data()
 
     def create_vocal(self):
         '''
@@ -114,7 +114,7 @@ class Region:
         2021/11/20 验证 计数和字典映射转化正确 + 热度词转化为经纬度转化正确
         '''
         # 建立字典对cell_id进行计数
-        id_counter={}
+        id_counter = {}
         # 对编码值进行计数
         with h5py.File(self.h5path, 'r') as f:
             read_trj_num = min(self.max_trjs_num, f.attrs['num'])
@@ -128,7 +128,7 @@ class Region:
                     # 对每个map_id进行计数
                     id_counter[map_id] = id_counter.get(map_id, 0) + 1
         # 对计数从大到小排序
-        self.sort_cnt = sorted(id_counter.items(),key=lambda dict:dict[1],reverse=True)
+        self.sort_cnt = sorted(id_counter.items(), key=lambda count: count[1], reverse=True)
         # 查找 热度词， 即非低频词, 已经按照出现频词从大到小排序
         sort_cnt = self.sort_cnt
         self.hot_ids = [int(sort_cnt[i][0]) for i in range(len(sort_cnt)) if sort_cnt[i][1]>=self.args.hot_freq]
@@ -160,7 +160,7 @@ class Region:
         del self.sort_cnt, self.hot_lonlats
         gc.collect()
 
-    def get_VD(self):
+    def create_dist(self):
         '''
         获得所有 hotcell 即 word 两两之间的距离， 构建 V, Ds, Dt
 
@@ -173,9 +173,9 @@ class Region:
         D, V = self.tree.query(self.X, self.args.space_nn_nums)
         D, V = D.tolist(), V.tolist()
         # 从 space_nn_nums 个按照空间最近的邻居中， 再选一定数目个时间上最接近的
-        self.all_nn_time_diff = []  # 时间上的距离
-        self.all_nn_space_diff = [] # 空间上的距离
-        self.all_nn_index = []
+        all_nn_time_diff = []  # 时间上的距离
+        all_nn_space_diff = [] # 空间上的距离
+        all_nn_index = []
         for ii in tqdm(range(len(self.hot_ts)), desc='create VD'):
             # 编号为ii的空间邻居
             space_nn = V[ii]
@@ -197,59 +197,54 @@ class Region:
             # 转换到space_nn上,注意所有V需要+4
             top_k = [space_nn[ii] + self.args.start for ii in top_k_index]
 
-            self.all_nn_time_diff.append(top_k_time_diff)
-            self.all_nn_space_diff.append(top_k_dist_diff)
-            self.all_nn_index.append(top_k)
+            all_nn_time_diff.append(top_k_time_diff)
+            all_nn_space_diff.append(top_k_dist_diff)
+            all_nn_index.append(top_k)
 
         # 构建加上0，1，2，3 (PAD, BOS, EOS, UNK) 号词后的距离V,D
         for ii in range(4):
-            self.all_nn_time_diff.insert(ii, [0] * self.args.time_nn_nums)
-            self.all_nn_space_diff.insert(ii, [0] * self.args.time_nn_nums)
-            self.all_nn_index.insert(ii, [ii] * self.args.time_nn_nums)
+            all_nn_time_diff.insert(ii, [0] * self.args.time_nn_nums)
+            all_nn_space_diff.insert(ii, [0] * self.args.time_nn_nums)
+            all_nn_index.insert(ii, [ii] * self.args.time_nn_nums)
         # 写入到V,D文件中， 将对应的写入到h5文件中
         f = h5py.File(self.VDpath, "w")
         # 存储时空上的K*time_size近邻, 空间距离以及时间距离
         # V.shape = (热度词个数+4)*时空上的邻居数目
-        f["V"] = np.array(self.all_nn_index)
-        f["Ds"] = np.array(self.all_nn_space_diff)
-        f["Dt"] = np.array(self.all_nn_time_diff)
+        f["V"] = np.array(all_nn_index)
+        f["Ds"] = np.array(all_nn_space_diff)
+        f["Dt"] = np.array(all_nn_time_diff)
 
-        # 删除无用变量
-        del self.all_nn_time_diff
-        del self.all_nn_space_diff
-        del self.all_nn_index
-        gc.collect()
-
-    def write(self, f, f1, train_num, val_num, isTrain):
+    def write(self, f,  train_num, val_num, isTrain):
         write_or_add = 'w'
         train_or_val = 'train' if isTrain else 'val'
         start = 0 if isTrain else train_num
         num = train_num if isTrain else val_num
 
+        all_val_trips = []
+        all_val_ts = []
+
         src_writer = open(os.path.join(self.save_path, '{}.src'.format(train_or_val)), write_or_add)
         trg_writer = open(os.path.join(self.save_path, '{}.trg'.format(train_or_val)), write_or_add)
         mta_writer = open(os.path.join(self.save_path, '{}.mta'.format(train_or_val)), write_or_add)
-        # 记录总共记录的有效测试集轨迹数
-        valid_trip_nums = 0
 
         for i in range(start, start+num):
             trip = np.array(f.get('trips/' + str(i + 1)))  # numpy n*2
             ts = np.array(f.get('timestamps/' + str(i + 1)), dtype=np.int32)  # numpy n*1
 
             # 用于处理porto数据集部分长度超出限制的情况
-            if len(trip)>100:
+            if len(trip) > settings.max_len:
                 trips = []
                 tss = []
-
-                while len(trip) >= 100:
+                # 持续随机切割轨迹
+                while len(trip) >= settings.max_len:
                     # 将轨迹按min-max轨迹长度生成一个随机长度的轨迹
-                    rand_len = np.random.randint(20, 100)
+                    rand_len = np.random.randint(settings.min_len, settings.max_len)
                     trips.append(trip[0:rand_len])
                     trip = trip[rand_len:]
 
                     tss.append(ts[0:rand_len])
                     ts = ts[rand_len:]
-                if len(trip) >= 20:
+                if len(trip) >= settings.min_len:
                     trips.append(trip)
                     tss.append(ts)
             else:
@@ -257,26 +252,18 @@ class Region:
                 tss = [ts]
 
             for trip, ts in zip(trips, tss):
+                # 验证集数据单独分离出来，用于在实验评价中生成实验数据
+                if not isTrain:
+                    all_val_trips.append(trip.tolist())
+                    all_val_ts.append(ts.tolist())
                 mta = self.tripmeta(trip, ts)
                 exact_trj = self.trip2words(trip, ts)  # 轨迹时空编码序列，全部为热度词，有效减少了token数目
-
-                if len(exact_trj)<20 or len(exact_trj)>100:
+                if len(exact_trj) < settings.min_len or len(exact_trj) > settings.max_len:
                     continue
-                # assert 20 <= len(exact_trj) <= 100, "轨迹长度出错"
-
                 # 根据原轨迹, 只对发生下采样和偏移的位置点进行重新更新，增强效率
-                noise_trips, noise_ts, noise_trjs = self.downsamplingDistort(exact_trj, trip, ts)
-
-                if i % 1000 == 0 and i>0:
+                noise_trips, noise_ts, noise_trjs = self.add_noise(exact_trj, trip, ts)
+                if i % 1000 == 0 and i > 0:
                     print("生成进度：{}/{} ,{}".format(i, train_num+val_num, time.ctime()))
-
-                if not isTrain:
-                    for location, t in zip(noise_trips, noise_ts):
-                        f1["noise_trips/%d"%valid_trip_nums] = location
-                        f1["noise_ts/%d"%valid_trip_nums] = t
-                        f1["trips/%d" % valid_trip_nums] = trip
-                        f1["ts/%d"% valid_trip_nums] = ts
-                        valid_trip_nums += 1
                 # 写出编码序列值到txt文本
                 for each in noise_trjs:
                     # write src
@@ -295,31 +282,91 @@ class Region:
         trg_writer.close()
         mta_writer.close()
 
-        return valid_trip_nums
+        return all_val_trips, all_val_ts
 
-    def createTrainVal(self, train_ratio=0.8):
+    def create_data(self, train_ratio=0.95):
         """
-        划分训练集和测试集并写入文件 train.src/ train1.trg/ val.trg/ val.src
+        划分训练集和测试集并写入文件 train.src/ train.trg/ val.trg/ val.src
 
         :param train_ratio: 训练集轨迹所占比例
         """
         # 划分训练集和测试集
         f = h5py.File(self.h5path, 'r')
         # 写出测试集的下采样+噪声偏移后的轨迹位置+时间戳信息文本
-        path = os.path.join(self.save_path, self.args.city_name + "_trj.h5")
-        f1 = h5py.File(path, 'w')
         trj_nums = min(self.max_trjs_num, f.attrs['num'])
         train_num = int(train_ratio * trj_nums)
         val_num = trj_nums - train_num
         # 生成训练集和测试集
-        valid_trip_nums = self.write(f, f1, train_num, val_num, True)
-        valid_trip_nums = self.write(f, f1, train_num, val_num, False)
-        print("写出有效测试集trip数目为: ", valid_trip_nums)
-        f1.attrs['num'] = valid_trip_nums
-        f1.close()
+        all_val_trips, all_val_ts = self.write(f,  train_num, val_num, True)
+        # all_val_trips, all_val_ts = self.write(f,  train_num, val_num, False)
+        print("写出有效测试集trip数目为: ", len(all_val_trips))
         f.close()
+        # 生成实验数据
+        # self.generate_exp_data(all_val_trips, all_val_ts)
 
-    def downsamplingDistort(self, exact_trj, trip, ts):
+    def generate_exp_data(self, all_val_trips, all_val_ts):
+        all_val_trips, all_val_ts = np.array(all_val_trips), np.array(all_val_ts)
+        """ 生成不同下采样率和噪声率的 P0, P1, Q0, Q1"""
+        # 1. 划分P, Q
+        num_q, num_p = 100, 500
+        select_indexes = random.sample(range(len(all_val_trips)), num_q + num_p)
+        P0, P1, Q0, Q1 = [], [], [], []
+        for ii in range(select_indexes):
+            index = select_indexes[ii]
+            trip = all_val_trips[index]
+            ts = all_val_ts[index]
+            trip0 = [trip[ii] for ii in range(len(trip)) if ii % 2 == 0]
+            trip1 = [trip[ii] for ii in range(len(trip)) if ii % 2 == 1]
+            ts0 = [ts[ii] for ii in range(len(ts)) if ii % 2 == 0]
+            ts1 = [ts[ii] for ii in range(len(ts)) if ii % 2 == 1]
+
+            exact_trj0 = self.trip2words(trip0, ts0)
+            exact_trj1 = self.trip2words(trip1, ts1)
+            if ii<num_q:
+                Q0.append([trip0, ts0, exact_trj0])
+                Q1.append([trip1, ts1, exact_trj1])
+            else:
+                P0.append([trip0, ts0, exact_trj0])
+                P1.append([trip1, ts1, exact_trj1])
+
+    def downsample_and_distort(self, data):
+        """
+        输入data为 [trip, ts, exact_trj] 集合， 输出为各种下采样和distort后的数据
+        :param data:
+        :return:
+        """
+        mu = 0
+        region_sigma = 0.001
+        time_sigma = 200
+
+        all_res_r1 = []
+        for r1 in self.dropping_rates:
+            res_r1 = []
+            for (trip, ts, exact_trj) in data:
+                randx = np.random.rand(len(trip)) > r1
+                # 每条轨迹的起点和终点 设置为 不可下采样删除
+                randx[0], randx[-1] = True, True
+                sampled_trip = trip[randx]
+                sampled_t = ts[randx]
+                sampled_trj = np.array(exact_trj)[randx]
+                res_r1.append([sampled_trip, sampled_t, sampled_trj])
+            all_res_r1.append(res_r1)
+
+        all_res_r2 = []
+        for r2 in self.distorting_rates:
+            res_r2 = []
+            for (trip, ts, exact_trj) in data:
+                randx = np.random.rand(len(sampled_trip)) < r2
+                randx[0], randx[-1] = False, False
+                sampled_trip[randx] = trip[randx] + random.gauss(mu, region_sigma)
+                sampled_t[randx] = ts[randx] + random.gauss(mu, time_sigma)
+                # 只需要对需要产生噪声的位置点 编码进行重新更新
+                exact_trj[randx] = self.trip2words(exact_trj[randx], sampled_t[randx])
+                res_r2.append([sampled_trip, sampled_t, exact_trj])
+            all_res_r2.append(res_r2)
+        return all_res_r1, all_res_r2
+
+    def add_noise(self, exact_trj, trip, ts):
         """
         下采样+添加噪声， 只对发生下采样和偏移的位置点进行重新计算热度词编码
         2021/11/20 验证准确性完毕
@@ -341,7 +388,7 @@ class Region:
         for dropping_rate in self.dropping_rates:
             randx = np.random.rand(len(trip))>dropping_rate
             # 每条轨迹的起点和终点 设置为 不可下采样删除
-            randx[0], randx[-1] = True,True
+            randx[0], randx[-1] = True, True
             sampled_trip = trip[randx]
             sampled_t = ts[randx]
             sampled_trj = np.array(exact_trj)[randx]
@@ -405,7 +452,7 @@ class Region:
     ****************************************************************************************************************************************************
     '''
 
-    def lonlat2xyoffset(self,lon, lat):
+    def lonlat2xyoffset(self, lon, lat):
         '''经纬度转换为米为单位, 映射到平面图上 (116.3, 40.0)->(4,8)'''
         xoffset = round((lon - self.args.lons[0]) / self.args.scale)
         yoffset = round((lat - self.args.lats[0]) / self.args.scale)

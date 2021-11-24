@@ -153,17 +153,17 @@ def validate(val_data, model, loss_function, args):
     if val_data.size % args.batch > 0:
         num_iteration += 1
 
-    total_genloss = 0
+    total_gen_loss = 0
     for iteration in tqdm(range(num_iteration), desc="验证检验"):
         # 获取一批验证集数据
         gen_data = val_data.get_batch_generative()
         with torch.no_grad():
             gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
-            total_genloss += gen_loss.item() * gen_data.trg.size(1)
+            total_gen_loss += gen_loss.item() * gen_data.trg.size(1)
     # switch back to training mode
     m0.train()
     m1.train()
-    return total_genloss / val_data.size
+    return total_gen_loss / val_data.size
 
 
 def load_data(args):
@@ -178,12 +178,12 @@ def load_data(args):
     print("Percent: {}".format(train_data.p))
 
     # 如果存在验证集，加载验证集
-    valsrc = os.path.join(args.data, "val.src")
-    valtrg = os.path.join(args.data, "val.trg")
-    valmta = os.path.join(args.data, "val.mta")
+    val_src = os.path.join(args.data, "val.src")
+    val_trg = os.path.join(args.data, "val.trg")
+    val_mta = os.path.join(args.data, "val.mta")
     val_data = None
-    if os.path.isfile(valsrc) and os.path.isfile(valtrg):
-        val_data = DataLoader(valsrc, valtrg, valmta, args.batch, args.bucketsize, True)
+    if os.path.isfile(val_src) and os.path.isfile(val_trg):
+        val_data = DataLoader(val_src, val_trg, val_mta, args.batch, args.bucketsize, True)
         print("Reading validation data...")
         val_data.load(args.read_val_num)
         assert val_data.size > 0, "Validation data size must be greater than 0"
@@ -236,7 +236,7 @@ def train(args):
     triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
 
     # 输入到输出整个encoder-decoder的map
-    m0 = EncoderDecoder(args.vocab_size, args.embedding_size, args.hidden_size, args.num_layers, args.dropout, args.bidirectional)
+    m0 = EncoderDecoder(args)
     #  Encoder到Decoder 的中间输出输出到词汇表向量的映射，并进行了log操作
     m1 = nn.Sequential(nn.Linear(args.hidden_size, args.vocab_size), nn.LogSoftmax(dim=1))
     if args.cuda and torch.cuda.is_available():
@@ -287,7 +287,7 @@ def train(args):
             # 获取一批补位+转置后的数据对象 TF=['src', 'lengths', 'trg', 'invp']
             # src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
             gen_data = train_data.get_batch_generative()
-            # 计算损失
+            # 计算生成损失+三元判别损失
             train_gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
             train_dis_cross, train_dis_inner = 0, 0
             if args.use_discriminative and iteration % args.dis_freq == 0:
@@ -300,7 +300,8 @@ def train(args):
             # 损失按一定权重相加 train_gen_loss： 使损失尽可能小 discriminative——loss: 使序列尽可能相似
             # 计算词的平均损失
             train_gen_loss = train_gen_loss / gen_data.trg.size(0)
-            train_loss = (1-args.discriminative_w)*train_gen_loss + args.discriminative_w * (train_dis_cross + train_dis_inner)
+            train_dis_loss = train_dis_cross + train_dis_inner
+            train_loss = (1-args.discriminative_w)*train_gen_loss + args.discriminative_w * train_dis_loss
             train_loss.backward()
             # 限制梯度下降的阈值，防止梯度消失现象
             clip_grad_norm_(m0.parameters(), args.max_grad_norm)
@@ -321,6 +322,7 @@ def train(args):
             if iteration % args.save_freq == 0 and iteration > 0:
                 # 如果训练集能够取得更好的模型，再进一步进行验证集验证
                 if train_loss > best_train_loss:
+                    invalid_count += 1
                     continue
                 val_loss = validate(val_data, (m0, m1), loss_function, args)
                 print("current validate loss: ", val_loss)
@@ -328,12 +330,12 @@ def train(args):
                 if val_loss <= best_val_loss:
                     best_val_loss = val_loss
                     invalid_count = 0
-                    logging.info("Best model with loss {} at iteration {} @ {}".format(best_val_loss, iteration, time.ctime()))
+                    logging.info("Best model with loss {} at {}".format(best_val_loss, time.ctime()))
                     is_best = True
                 else:
                     is_best = False
                     invalid_count += 1
-                    if invalid_count > 30:
+                    if invalid_count > 10:
                         print("多次训练不能再减少损失，停止训练")
                         break
                 if is_best:
@@ -341,7 +343,6 @@ def train(args):
                     best_train_loss = train_loss.item()
                     if train_gen_loss < best_train_gen_loss:
                         best_train_gen_loss = best_train_loss
-                    train_dis_loss = train_dis_cross + train_dis_inner
                     train_dis_loss = train_dis_loss.item()
                     if train_dis_loss < best_train_dis_loss:
                         best_train_dis_loss = train_dis_loss

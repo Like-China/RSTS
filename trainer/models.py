@@ -181,17 +181,16 @@ class EncoderDecoder(nn.Module):
     # dropout = args.dropout = 0.2
     # bidirectional = true
     # embedding 在此处定义，encoder and decoder共享，是将18864的词汇表映射到一个256维度的向量空间
-    def __init__(self, vocab_size, embedding_size,
-                       hidden_size, num_layers, dropout, bidirectional):
+    def __init__(self, args):
         super(EncoderDecoder, self).__init__()
-        self.vocab_size = vocab_size
-        self.embedding_size = embedding_size
-        self.embedding = nn.Embedding(vocab_size, embedding_size, padding_idx=settings.PAD)
-        self.encoder = Encoder(embedding_size, hidden_size, num_layers,
-                               dropout, bidirectional, self.embedding)
-        self.decoder = Decoder(embedding_size, hidden_size, num_layers,
-                               dropout, self.embedding)
-        self.num_layers = num_layers
+        self.vocab_size = args.vocab_size
+        self.embedding_size = args.embedding_size
+        self.embedding = nn.Embedding(args.vocab_size, args.embedding_size, padding_idx=settings.PAD)
+        self.encoder = Encoder(args.embedding_size, args.hidden_size, args.num_layers,
+                               args.dropout, args.bidirectional, self.embedding)
+        self.decoder = Decoder(args.embedding_size, args.hidden_size, args.num_layers,
+                               args.dropout, self.embedding)
+        self.num_layers = args.num_layers
 
     # 加载提前训练好的词向量
     def load_pretrained_embedding(path, self=None):
