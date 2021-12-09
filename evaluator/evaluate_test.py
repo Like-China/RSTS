@@ -6,6 +6,11 @@ import os
 import h5py
 import settings
 
+"""
+测试函数
+
+运用模型，对给定的输入词向量获取对应的预测词向量
+"""
 
 def evaluate(src, model, max_length):
     """

@@ -13,7 +13,7 @@ min_len = 20
 max_len = 100
 city_name = "beijing" if city_code == 1 else "porto"
 scale = 0.002
-time_size = 500
+time_size = 400
 """
 参数设定
 """

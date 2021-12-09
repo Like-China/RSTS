@@ -7,6 +7,9 @@
 ./data/city_name/cityname_regionScale_timeScale/val.src
 ./data/city_name/cityname_regionScale_timeScale/val.trg
 ./data/city_name/cityname_regionScale_timeScale/val.mtc
+
+同时写出用于实验表现验证的数据
+exp_data_r1 为最多max_exp_trj_num条 [trip, ts, exact_trj] 记录
 """
 # -*- coding: utf-8 -*-
 import random, h5py, os, warnings, gc, time, argparse
@@ -86,12 +89,13 @@ class Region:
         # 读取轨迹 h5文件路径  E://data/porto.h5
         self.h5path = os.path.join('E://data', self.args.city_name+".h5")
         # 读取的最大轨迹数目
-        self.max_trjs_num = 200000000000
+        self.max_trjs_num = 20000000
         # 输出V，Ds,Dt 的 path ./data/porto_dist.h5
         self.VDpath = os.path.join(self.save_path, "dist.h5")
         # 下采样率+产生噪声的概率
         self.dropping_rates = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
         self.distorting_rates = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        self.max_exp_trj_num = 200000
         # 记录 map_id 到 热度词 的 nn 映射
         self.mapId2nnword = {}
         # 空间top-k邻居选取数， 用于为不属于热度词中的mapID选择一个可以替换的最近热度词邻居
@@ -284,7 +288,7 @@ class Region:
 
         return all_val_trips, all_val_ts
 
-    def create_data(self, train_ratio=0.95):
+    def create_data(self, train_ratio=0.8):
         """
         划分训练集和测试集并写入文件 train.src/ train.trg/ val.trg/ val.src
 
@@ -297,21 +301,20 @@ class Region:
         train_num = int(train_ratio * trj_nums)
         val_num = trj_nums - train_num
         # 生成训练集和测试集
-        all_val_trips, all_val_ts = self.write(f,  train_num, val_num, True)
-        # all_val_trips, all_val_ts = self.write(f,  train_num, val_num, False)
-        print("写出有效测试集trip数目为: ", len(all_val_trips))
+        # all_val_trips, all_val_ts = self.write(f,  train_num, val_num, True)
+        all_val_trips, all_val_ts = self.write(f,  train_num, val_num, False)
+        # print("写出有效测试集trip数目为: ", len(all_val_trips))
         f.close()
-        # 生成实验数据
-        # self.generate_exp_data(all_val_trips, all_val_ts)
+        # 根据验证集数据，生成实验用数据
+        self.generate_exp_data(all_val_trips, all_val_ts)
 
-    def generate_exp_data(self, all_val_trips, all_val_ts):
-        all_val_trips, all_val_ts = np.array(all_val_trips), np.array(all_val_ts)
+    def get_meanrank_data(self, all_val_trips, all_val_ts ):
         """ 生成不同下采样率和噪声率的 P0, P1, Q0, Q1"""
         # 1. 划分P, Q
-        num_q, num_p = 100, 500
+        num_q, num_p = 1000, 1000
         select_indexes = random.sample(range(len(all_val_trips)), num_q + num_p)
-        P0, P1, Q0, Q1 = [], [], [], []
-        for ii in range(select_indexes):
+        self.P0, self.P1, self.Q0, self.Q1 = [], [], [], []
+        for ii in range(len(select_indexes)):
             index = select_indexes[ii]
             trip = all_val_trips[index]
             ts = all_val_ts[index]
@@ -319,15 +322,49 @@ class Region:
             trip1 = [trip[ii] for ii in range(len(trip)) if ii % 2 == 1]
             ts0 = [ts[ii] for ii in range(len(ts)) if ii % 2 == 0]
             ts1 = [ts[ii] for ii in range(len(ts)) if ii % 2 == 1]
-
             exact_trj0 = self.trip2words(trip0, ts0)
             exact_trj1 = self.trip2words(trip1, ts1)
             if ii<num_q:
-                Q0.append([trip0, ts0, exact_trj0])
-                Q1.append([trip1, ts1, exact_trj1])
+                self.Q0.append([trip0, ts0, exact_trj0])
+                self.Q1.append([trip1, ts1, exact_trj1])
             else:
-                P0.append([trip0, ts0, exact_trj0])
-                P1.append([trip1, ts1, exact_trj1])
+                self.P0.append([trip0, ts0, exact_trj0])
+                self.P1.append([trip1, ts1, exact_trj1])
+
+        all_res_r1, all_res_r2 = self.downsample_and_distort(self.P0)
+        np.save("P0_r1", all_res_r1, allow_pickle=True)
+        np.save("P0_r2", all_res_r2, allow_pickle=True)
+
+        all_res_r1, all_res_r2 = self.downsample_and_distort(self.P1)
+        np.save("P1_r1", all_res_r1, allow_pickle=True)
+        np.save("P1_r2", all_res_r2, allow_pickle=True)
+
+        all_res_r1, all_res_r2 = self.downsample_and_distort(self.Q0)
+        np.save("Q0_r1", all_res_r1, allow_pickle=True)
+        np.save("Q0_r2", all_res_r2, allow_pickle=True)
+
+        all_res_r1, all_res_r2 = self.downsample_and_distort(self.Q1)
+        np.save("Q1_r1", all_res_r1, allow_pickle=True)
+        np.save("Q1_r2", all_res_r2, allow_pickle=True)
+
+    def generate_exp_data(self, all_val_trips, all_val_ts):
+        all_val_trips, all_val_ts = np.array(all_val_trips), np.array(all_val_ts)
+        # 得到不同下采样率和噪声率的数据用于实验测量
+        self.exp_data = []
+        ii = 0
+        max_num = min(len(all_val_trips), self.max_exp_trj_num)
+        for trip, ts in zip(all_val_trips, all_val_ts):
+            exact_trj = self.trip2words(trip, ts)
+            self.exp_data.append([trip, ts, exact_trj])
+            ii += 1
+            if ii > max_num:
+                break
+
+        self.all_res_r1, self.all_res_r2 = self.downsample_and_distort(self.exp_data)
+        path1 = os.path.join(self.save_path, "exp_data_r1")
+        path2 = os.path.join(self.save_path, "exp_data_r2")
+        np.save(path1, self.all_res_r1, allow_pickle=True)
+        np.save(path2, self.all_res_r2, allow_pickle=True)
 
     def downsample_and_distort(self, data):
         """
@@ -343,6 +380,7 @@ class Region:
         for r1 in self.dropping_rates:
             res_r1 = []
             for (trip, ts, exact_trj) in data:
+                trip, ts, exact_trj = np.array(trip),np.array(ts),np.array(exact_trj)
                 randx = np.random.rand(len(trip)) > r1
                 # 每条轨迹的起点和终点 设置为 不可下采样删除
                 randx[0], randx[-1] = True, True
@@ -356,13 +394,14 @@ class Region:
         for r2 in self.distorting_rates:
             res_r2 = []
             for (trip, ts, exact_trj) in data:
-                randx = np.random.rand(len(sampled_trip)) < r2
+                trip, ts, exact_trj = np.array(trip),np.array(ts),np.array(exact_trj)
+                randx = np.random.rand(len(trip)) < r2
                 randx[0], randx[-1] = False, False
-                sampled_trip[randx] = trip[randx] + random.gauss(mu, region_sigma)
-                sampled_t[randx] = ts[randx] + random.gauss(mu, time_sigma)
+                trip[randx] = trip[randx] + random.gauss(mu, region_sigma)
+                ts[randx] = ts[randx] + random.gauss(mu, time_sigma)
                 # 只需要对需要产生噪声的位置点 编码进行重新更新
-                exact_trj[randx] = self.trip2words(exact_trj[randx], sampled_t[randx])
-                res_r2.append([sampled_trip, sampled_t, exact_trj])
+                exact_trj[randx] = self.trip2words(trip[randx], ts[randx])
+                res_r2.append([trip, ts, exact_trj])
             all_res_r2.append(res_r2)
         return all_res_r1, all_res_r2
 
@@ -419,7 +458,7 @@ class Region:
         point = np.array([long,lat])
         k_dists, k_indexs = self.tree.query(point, K, p=1)
         return k_dists, k_indexs+4
-    
+
     def get_a_nn(self, map_id):
         """
         获得一个离 mapId最近的 hot word
@@ -467,7 +506,7 @@ class Region:
     def offset2spaceId(self, xoffset, yoffset):
         ''' (xoffset,yoffset) -> space_cell_id  (4,8)->116'''
         return int(yoffset * self.args.numx + xoffset)
-    
+
     def spaceId2offset(self, space_cell_id):
         ''' space_cell_id -->(x,y) 116->(4.8)'''
         yoffset = space_cell_id // self.args.numx
@@ -479,34 +518,34 @@ class Region:
         xoffset, yoffset = self.lonlat2xyoffset(lon, lat)
         space_cell_id = self.offset2spaceId(xoffset, yoffset)
         return int(space_cell_id)
-    
+
     def spaceId2gps(self, space_cell_id):
         '''space_cell_id -->gps 116->116.3,40'''
         xoffset, yoffset = self.spaceId2offset(space_cell_id)
         lon,lat = self.xyoffset2lonlat(xoffset,yoffset)
         return lon,lat
-    
+
     def spaceId2mapId(self, space_id, t):
         ''' space_cell_id+t --> map_id  116,10->1796'''
         return int(space_id + t*self.args.space_cell_size)
-    
+
     def mapId2spaceId(self, map_id):
         ''' map_id -->space_cell_id  1796-> 116'''
         return int(map_id % self.args.space_cell_size)
-    
+
     def mapId2t(self, map_id):
         ''' map_id -->t 1796-> 10'''
         return int(map_id // self.args.space_cell_size)
-    
+
     def mapId2word(self, map_id):
         ''' map_id -> vocal_id 若不在热度词中，则用与其较近的词代替 '''
         word = self.hotcell2word.get(map_id, self.UNK)
         return word if word != self.UNK else self.get_a_nn(map_id)
-        
+
     def word2mapId(self, word):
         ''' word -> map_id 不会存在查找不到的情况'''
         return self.word2hotcell.get(word, 0)
-    
+
     def word2xyt(self, word):
         ''' word --> xoffset,yoffset,t '''
         map_id = self.word2mapId(word)
@@ -514,19 +553,19 @@ class Region:
         space_id = self.mapId2spaceId(map_id)
         xoffset,yoffset = self.spaceId2offset(space_id)
         return xoffset,yoffset,t
-    
+
     def xyt2word(self,x,y,t):
         ''' xoffset,yoffset,t -->word '''
         space_id = self.offset2spaceId(x, y);
         map_id = self.spaceId2mapId(space_id, t)
         word = self.mapId2word(map_id)
         return word
-    
+
     def mapIds2words(self, map_ids):
         ''' map_ids --> words'''
         words = [self.mapId2word(id) for id in map_ids]
         return words
-    
+
     def words2mapIds(self, words):
         '''words -+--> map_ids'''
         map_ids = [self.word2hotcell.get(id, 0) for id in words]
@@ -550,7 +589,7 @@ class Region:
             map_ids.append(map_id)
         return list(map_ids)
 
-    def trip2words(self, trip,ts):
+    def trip2words(self, trip, ts):
         ''' 减少迭代次数的trip2words '''
         words = []
         for (lon, lat), t in zip(trip, ts):
@@ -572,7 +611,7 @@ class Region:
         
         long_centroids = long_min + (long_max - long_min) / 2
         lat_centroids = lat_min + (lat_max - lat_min) / 2
-        return round(long_centroids,8), round(lat_centroids,8), round(ts_centroids,4)
+        return round(long_centroids, 8), round(lat_centroids, 8), round(ts_centroids, 4)
 
 
 if __name__ == "__main__":
