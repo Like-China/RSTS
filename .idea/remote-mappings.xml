@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteMappingsManager">
+    <list>
+      <list>
+        <remote-mappings server-id="python@sftp://Like@121.48.161.76:22/home/Like/.conda/envs/like_torch/bin/python">
+          <settings>
+            <list>
+              <mapping local-root="$PROJECT_DIR$" remote-root="/home/Like/python_workplace/similarity_new1_single_GPU" />
+            </list>
+          </settings>
+        </remote-mappings>
+        <remote-mappings server-id="python@sshConfig://like@121.48.164.33:22 password/home/like/anaconda3/envs/like_torch/bin/python" />
+      </list>
+    </list>
+  </component>
+</project>

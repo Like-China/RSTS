@@ -6,20 +6,20 @@ from funcy import merge
 from loader.data_utils import *
 from tqdm import tqdm
 import settings
-
+import random
 
 class DataLoader:
     """
-    srcfile: source file name
+    src_file: source file name
     trg_file: target file name
-    batch: batch size
-    validate: if validate = True return batch orderly otherwise return batch randomly
+    batch_size: batch_size size
+    validate: if validate = True return batch_size orderly otherwise return batch_size randomly
     """
-    def __init__(self, srcfile, trg_file, mta_file, batch, bucket_size, validate=False):
-        self.srcfile = srcfile
+    def __init__(self, src_file, trg_file, mta_file, batch_size, bucket_size, validate=False):
+        self.src_file = src_file
         self.trg_file = trg_file
         self.mta_file = mta_file
-        self.batch = batch
+        self.batch_size = batch_size
         self.validate = validate
         self.bucket_size = bucket_size
         # 记录轨迹信息
@@ -31,6 +31,9 @@ class DataLoader:
         # 用于批次获取测试集
         self.start = 0
         self.size = 0
+        # 记录最大最小轨迹位置点id, 共有多少条轨迹
+        self.minID = 100
+        self.maxID = 0
 
     # 插入8组不同的轨迹长度范围的轨迹到轨迹中，对于每一条src轨迹和目标轨迹，判断它们的长度并加入到到对应列表中
     def insert(self, s, t, m):
@@ -48,16 +51,18 @@ class DataLoader:
         self.trg_data = [[] for _ in range(len(self.bucket_size))]
         self.mta_data = [[] for _ in range(len(self.bucket_size))]
 
-        src_stream, trg_stream, mta_stream = open(self.srcfile, 'r'), open(self.trg_file, 'r'), open(self.mta_file, 'r')
+        src_stream, trg_stream, mta_stream = open(self.src_file, 'r'), open(self.trg_file, 'r'), open(self.mta_file, 'r')
         num_line = 0
         with tqdm(total=max_num_line, desc='Reading Traj', leave=True, ncols=100, unit='B', unit_scale=True) as pbar:
             for (s, t, m) in zip(src_stream, trg_stream, mta_stream):
                 s = [int(x) for x in s.split()]
                 t = [settings.BOS] + [int(x) for x in t.split()] + [settings.EOS]
                 m = [float(x) for x in m.split()]
-                if len(s) > 0:
-                    num_line += self.insert(s, t, m)
                 pbar.update(1)
+                if len(s) > 0 and random.random() > 0.4:
+                    num_line += self.insert(s, t, m)
+                    self.maxID = max(max(s), self.maxID)
+                    self.minID = min(min(s), self.minID)
                 if num_line >= max_num_line > 0:
                     break
         # if validate  we merge all buckets into one
@@ -66,13 +71,13 @@ class DataLoader:
             self.trg_data = np.array(merge(*self.trg_data))
             self.mta_data = np.array(merge(*self.mta_data))
             self.start = 0
-            self.size = len(self.src_data)
         else:
             self.src_data = list(map(np.array, self.src_data))
             self.trg_data = list(map(np.array, self.trg_data))
             self.mta_data = list(map(np.array, self.mta_data))
             self.allocation = list(map(len, self.src_data))
             self.p = np.array(self.allocation) / sum(self.allocation)
+        self.size = len(self.src_data)
         src_stream.close(), trg_stream.close(), mta_stream.close()
 
     def get_batch(self):
@@ -81,11 +86,11 @@ class DataLoader:
         :return:
         """
         if self.validate:
-            src = self.src_data[self.start:self.start+self.batch]
-            trg = self.trg_data[self.start:self.start+self.batch]
-            mta = self.mta_data[self.start:self.start+self.batch]
-            # update `start` for next batch
-            self.start += self.batch
+            src = self.src_data[self.start:self.start+self.batch_size]
+            trg = self.trg_data[self.start:self.start+self.batch_size]
+            mta = self.mta_data[self.start:self.start+self.batch_size]
+            # update `start` for next batch_size
+            self.start += self.batch_size
             if self.start >= self.size:
                 self.start = 0
             return list(src), list(trg), list(mta)
@@ -94,7 +99,7 @@ class DataLoader:
             sample = np.random.multinomial(1, self.p)
             bucket = np.nonzero(sample)[0][0]
             # select data from the bucket
-            idx = np.random.choice(len(self.src_data[bucket]), self.batch)
+            idx = np.random.choice(len(self.src_data[bucket]), self.batch_size)
             src = self.src_data[bucket][idx]
             trg = self.trg_data[bucket][idx]
             mta = self.mta_data[bucket][idx]
@@ -107,7 +112,7 @@ class DataLoader:
         :return: ['src', 'lengths', 'trg', 'invp']
         """
         src, trg, _ = self.get_batch()
-        # src (seq_len1, batch), lengths (1, batch), trg (seq_len2, batch)
+        # src (seq_len1, batch_size), lengths (1, batch_size), trg (seq_len2, batch_size)
         return pad_arrays_pair(src, trg, keep_invp=False)
 
     def get_apn_cross(self):

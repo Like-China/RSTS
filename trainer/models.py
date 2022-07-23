@@ -228,6 +228,6 @@ class EncoderDecoder(nn.Module):
         """
         encoder_hn, H = self.encoder(src, lengths)
         decoder_h0 = self.encoder_hn2decoder_h0(encoder_hn)
-        ## target去除EOS行后调入decoder
+        # target去除EOS行后调入decoder
         output, decoder_hn = self.decoder(trg[:-1], decoder_h0, H)
         return output

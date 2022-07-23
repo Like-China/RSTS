@@ -1,15 +1,29 @@
 """
 通过对空间和时间进行划分，将每个轨迹点转化为token值
 通过读取h5文件中的轨迹，写出
-./data/city_name/cityname_regionScale_timeScale/train.src
-./data/city_name/cityname_regionScale_timeScale/train1.trg
-./data/city_name/cityname_regionScale_timeScale/train.mtc
-./data/city_name/cityname_regionScale_timeScale/val.src
-./data/city_name/cityname_regionScale_timeScale/val.trg
-./data/city_name/cityname_regionScale_timeScale/val.mtc
+data/city_name/cityname_regionScale_timeScale/train.src
+/data/city_name/cityname_regionScale_timeScale/train.trg
+/data/city_name/cityname_regionScale_timeScale/train.mtc
+/data/city_name/cityname_regionScale_timeScale/val.src
+/data/city_name/cityname_regionScale_timeScale/val.trg
+/data/city_name/cityname_regionScale_timeScale/val.mtc
+
+val.src
+每36行为一条精确轨迹的低质量轨迹
+每6行为一个下采样下的不同噪声偏移轨迹
 
 同时写出用于实验表现验证的数据
 exp_data_r1 为最多max_exp_trj_num条 [trip, ts, exact_trj] 记录
+porto单核需要12小时左右，其中生成词汇表和距离矩阵用时 4h
+beijing大概两小时
+
+对测试集，返回其所有的trips和ts用于生成实验用数据
+exp_data_r1 下采样的实验用数据 exp_data_r1[0]为一批下采样率为0的原始轨迹，里面每个记录形如[trip, ts, tokens]
+                            exp_data_r1[1]为一批下采样率为0.2的原始轨迹，里面每个记录形如[trip, ts, tokens]
+                            ...
+exp_data_r2 噪声偏移实验用数据 exp_data_r2[0]为一批噪声偏移率为0的原始轨迹，里面每个记录形如[trip, ts, tokens]
+                            exp_data_r2[1]为一批噪声偏移率为0.2的原始轨迹，里面每个记录形如[trip, ts, tokens]
+                            ...
 """
 # -*- coding: utf-8 -*-
 import random, h5py, os, warnings, gc, time, argparse
@@ -17,58 +31,34 @@ from tqdm import tqdm
 import numpy as np
 from scipy import spatial
 import settings
-from settings import set_args
 warnings.filterwarnings("ignore")
 
 
-def setRegionArgs():
+def setRegionArgs(city_name, scale, time_size):
     """
-    设置空间cell和时间cell划分的参数
-    
-    :param args: 全局参数
-    :return: 设置的空间和时间划分参数
+    parameter settings of space partition and time partition
     """
-    args = set_args(is_train=False)
     parser = argparse.ArgumentParser(description="Region.py")
-    parser.add_argument("-city_name", default=args.city_name, help="城市名")
-
-    if args.city_name == "beijing":
-        lons_range = [116.25, 116.55]
-        lats_range = [39.83, 40.03]
+    if city_name[0] == 'b':
+        lons_range, lats_range = [116.25, 116.55], [39.83, 40.03]
     else:
-        lons_range = [-8.735, -8.156]
-        lats_range = [40.953, 41.307]
-
-    # 获取在当前scale设定下，空间的划分
-    scale = args.scale
-    minx, miny = 0, 0
+        lons_range, lats_range = [-8.735, -8.156], [40.953, 41.307]
+    # space partition under specific scale
     maxx, maxy = (lons_range[1]-lons_range[0])//scale, (lats_range[1]-lats_range[0])//scale
-
-    # 空间划分参数
-    parser.add_argument("-lons", default= lons_range, help="经度范围")
-    parser.add_argument("-lats", default= lats_range, help="纬度范围")
-    parser.add_argument("-scale", default= scale, help="空间单元格大小")
-    parser.add_argument("-minx", type=int, default=minx, help="最小横坐标空间编号")
+    parser.add_argument("-lons", default= lons_range, help="range of longitude")
+    parser.add_argument("-lats", default= lats_range, help="range of latitude")
     parser.add_argument("-maxx", type=int, default=maxx, help="最大横坐标空间编号")
-    parser.add_argument("-miny", type=int, default=miny, help="最小纵坐标空间编号")
     parser.add_argument("-maxy", type=int, default=maxy, help="最大纵坐标空间编号")
     parser.add_argument("-numx", type=int, default=maxx, help="空间上横块数")
     parser.add_argument("-numy", type=int, default=maxy, help="空间上纵块数")
     parser.add_argument("-space_cell_size", type=int, default=maxx*maxy, help="空间cell数")
-
-    # 时间划分参数
-    time_size = args.time_size
-    parser.add_argument("-time_size", type = int, default=time_size, help="一天分为的时间段数目")
+    # time partition under specific number of time slices
     parser.add_argument("-time_span", type = int, default=86400 // time_size, help="每个时间段长度")
-
-    ''' 时空格子参数 '''
-    hot_freq = args.hot_freq
-    start = settings.UNK+1
-    parser.add_argument("-hot_freq", type = int, default = hot_freq, help="热度词频率")
-    parser.add_argument("-start", type = int, default = start, help="vocal word编码从4开始编号，0，1，2，3有特殊作用")
+    # spatio-temporal cells
+    parser.add_argument("-start", type = int, default = settings.UNK+1, help="vocal word编码从4开始编号，0，1，2，3有特殊作用")
     parser.add_argument("-space_nn_nums", type = int, default = 20, help="编码一个时空格子时，空间上的近邻筛选个数， 用于生成V, D")
     parser.add_argument("-time_nn_nums", type = int, default = 10, help="编码一个时空格子时，时间上的近邻筛选个数，也是最终的时空近邻个数, 用于生成V, D")
-    parser.add_argument("-map_cell_size", type = int, default = maxx*maxy*args.time_size, help="时空格子数目（x,y,t)三维")
+    parser.add_argument("-map_cell_size", type = int, default = maxx*maxy*time_size, help="时空格子数目（x,y,t)三维")
     args = parser.parse_args()
     return args
 
@@ -79,29 +69,27 @@ class Region:
     对于每一个原始的（x,y,t)轨迹点，将其转化为对应的时空格子编码
     """
 
-    def __init__(self):
+    def __init__(self,city_name, scale, time_size, max_trjs_num= 10000, max_exp_num=200000):
          
-        self.args = setRegionArgs()
-        # 结果数据文件存放路径 ,存储src,trg, mta的文件路径../data/porto/..
-        self.save_path = os.path.join('../../data', self.args.city_name, self.args.city_name+str(int(self.args.scale*100000))+str(self.args.time_size))
+        self.args = setRegionArgs(city_name, scale, time_size)
+        # 结果数据文件存放路径 ,存储src,trg, mta的文件路径
+        self.save_path = os.path.join(settings.data_path, city_name, city_name+str(int(scale*100000))+str(time_size))
         if not os.path.exists(self.save_path):
             os.makedirs(self.save_path)
-        # 读取轨迹 h5文件路径  E://data/porto.h5
-        self.h5path = os.path.join('E://data', self.args.city_name+".h5")
+        # 读取轨迹 h5文件路径
+        self.h5path = os.path.join(settings.h5_path, city_name+".h5")
         # 读取的最大轨迹数目
-        self.max_trjs_num = 20000000
+        self.max_trjs_num = max_trjs_num
         # 输出V，Ds,Dt 的 path ./data/porto_dist.h5
         self.VDpath = os.path.join(self.save_path, "dist.h5")
         # 下采样率+产生噪声的概率
         self.dropping_rates = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
         self.distorting_rates = [0, 0.1, 0.2, 0.3, 0.4, 0.5]
-        self.max_exp_trj_num = 200000
+        self.max_exp_trj_num = max_exp_num
         # 记录 map_id 到 热度词 的 nn 映射
         self.mapId2nnword = {}
         # 空间top-k邻居选取数， 用于为不属于热度词中的mapID选择一个可以替换的最近热度词邻居
         self.space_nn_topK = 20
-        # 低频词编码
-        self.UNK = settings.UNK
         print("参数设置：", self.args)
 
     def run(self):
@@ -109,7 +97,6 @@ class Region:
         self.create_vocal()
         print("使用利用热度词经纬度构建的Kdtree+ 热度词的时间段, 计算所有热度词的经纬度，构建每个热度词在时空上的近邻V,D")
         self.create_dist()
-        # 输出训练集和测试集
         self.create_data()
 
     def create_vocal(self):
@@ -121,8 +108,12 @@ class Region:
         id_counter = {}
         # 对编码值进行计数
         with h5py.File(self.h5path, 'r') as f:
-            read_trj_num = min(self.max_trjs_num, f.attrs['num'])
-            for ii in tqdm(range(read_trj_num)):
+            read_trj_num = min(self.max_trjs_num, f.attrs['num']-2)
+            # for ii in tqdm(range(read_trj_num)):
+            for ii in range(read_trj_num):
+                if ii % 10000 == 0:
+                    print("%d / %d"%(ii, read_trj_num))
+                    print(time.ctime())
                 trip = np.array(f.get('trips/' + str(ii + 1)))
                 ts = np.array(f.get('timestamps/' + str(ii + 1)))
                 for (lon, lat), t in zip(trip, ts):
@@ -131,11 +122,12 @@ class Region:
                     map_id = int(self.spaceId2mapId(space_id, t))
                     # 对每个map_id进行计数
                     id_counter[map_id] = id_counter.get(map_id, 0) + 1
+
         # 对计数从大到小排序
         self.sort_cnt = sorted(id_counter.items(), key=lambda count: count[1], reverse=True)
         # 查找 热度词， 即非低频词, 已经按照出现频词从大到小排序
         sort_cnt = self.sort_cnt
-        self.hot_ids = [int(sort_cnt[i][0]) for i in range(len(sort_cnt)) if sort_cnt[i][1]>=self.args.hot_freq]
+        self.hot_ids = [int(sort_cnt[i][0]) for i in range(len(sort_cnt)) if sort_cnt[i][1]>=settings.hot_freq]
         # 建立从 cell_id 到真实的 map_cell_id 的词典映射, map_cell_id从4开始
         self.hotcell2word = {}
         self.word2hotcell = {}
@@ -167,7 +159,6 @@ class Region:
     def create_dist(self):
         '''
         获得所有 hotcell 即 word 两两之间的距离， 构建 V, Ds, Dt
-
         运行较快, 2021/11/20 再次验证准确性
         V 每行为一个热度词的top K个时空热度词邻居
         '''
@@ -180,7 +171,9 @@ class Region:
         all_nn_time_diff = []  # 时间上的距离
         all_nn_space_diff = [] # 空间上的距离
         all_nn_index = []
-        for ii in tqdm(range(len(self.hot_ts)), desc='create VD'):
+        # for ii in tqdm(range(len(self.hot_ts)), desc='create VD'):
+        for ii in range(len(self.hot_ts)):
+            if ii % 10000 == 0: print("%d / %d"%(ii, len(self.hot_ts)))
             # 编号为ii的空间邻居
             space_nn = V[ii]
             # 空间距离
@@ -205,7 +198,7 @@ class Region:
             all_nn_space_diff.append(top_k_dist_diff)
             all_nn_index.append(top_k)
 
-        # 构建加上0，1，2，3 (PAD, BOS, EOS, UNK) 号词后的距离V,D
+        # 构建加上0，1，2，3 (settings.PAD, settings.BOS, settings.EOS, settings.UNK) 号词后的距离V,D
         for ii in range(4):
             all_nn_time_diff.insert(ii, [0] * self.args.time_nn_nums)
             all_nn_space_diff.insert(ii, [0] * self.args.time_nn_nums)
@@ -245,7 +238,6 @@ class Region:
                     rand_len = np.random.randint(settings.min_len, settings.max_len)
                     trips.append(trip[0:rand_len])
                     trip = trip[rand_len:]
-
                     tss.append(ts[0:rand_len])
                     ts = ts[rand_len:]
                 if len(trip) >= settings.min_len:
@@ -266,7 +258,7 @@ class Region:
                     continue
                 # 根据原轨迹, 只对发生下采样和偏移的位置点进行重新更新，增强效率
                 noise_trips, noise_ts, noise_trjs = self.add_noise(exact_trj, trip, ts)
-                if i % 1000 == 0 and i > 0:
+                if i % 10000 == 0 and i > 0:
                     print("生成进度：{}/{} ,{}".format(i, train_num+val_num, time.ctime()))
                 # 写出编码序列值到txt文本
                 for each in noise_trjs:
@@ -297,55 +289,17 @@ class Region:
         # 划分训练集和测试集
         f = h5py.File(self.h5path, 'r')
         # 写出测试集的下采样+噪声偏移后的轨迹位置+时间戳信息文本
-        trj_nums = min(self.max_trjs_num, f.attrs['num'])
+        trj_nums = min(self.max_trjs_num, f.attrs['num']-2)
         train_num = int(train_ratio * trj_nums)
         val_num = trj_nums - train_num
-        # 生成训练集和测试集
-        # all_val_trips, all_val_ts = self.write(f,  train_num, val_num, True)
+        # 生成训练集和测试集, 对测试集，返回其所有的trips和ts用于生成实验用数据
+        self.write(f,  train_num, val_num, True)
         all_val_trips, all_val_ts = self.write(f,  train_num, val_num, False)
-        # print("写出有效测试集trip数目为: ", len(all_val_trips))
+        print("写出有效测试集trip数目为: ", len(all_val_trips))
         f.close()
         # 根据验证集数据，生成实验用数据
+        print("生成实验评估用数据ing")
         self.generate_exp_data(all_val_trips, all_val_ts)
-
-    def get_meanrank_data(self, all_val_trips, all_val_ts ):
-        """ 生成不同下采样率和噪声率的 P0, P1, Q0, Q1"""
-        # 1. 划分P, Q
-        num_q, num_p = 1000, 1000
-        select_indexes = random.sample(range(len(all_val_trips)), num_q + num_p)
-        self.P0, self.P1, self.Q0, self.Q1 = [], [], [], []
-        for ii in range(len(select_indexes)):
-            index = select_indexes[ii]
-            trip = all_val_trips[index]
-            ts = all_val_ts[index]
-            trip0 = [trip[ii] for ii in range(len(trip)) if ii % 2 == 0]
-            trip1 = [trip[ii] for ii in range(len(trip)) if ii % 2 == 1]
-            ts0 = [ts[ii] for ii in range(len(ts)) if ii % 2 == 0]
-            ts1 = [ts[ii] for ii in range(len(ts)) if ii % 2 == 1]
-            exact_trj0 = self.trip2words(trip0, ts0)
-            exact_trj1 = self.trip2words(trip1, ts1)
-            if ii<num_q:
-                self.Q0.append([trip0, ts0, exact_trj0])
-                self.Q1.append([trip1, ts1, exact_trj1])
-            else:
-                self.P0.append([trip0, ts0, exact_trj0])
-                self.P1.append([trip1, ts1, exact_trj1])
-
-        all_res_r1, all_res_r2 = self.downsample_and_distort(self.P0)
-        np.save("P0_r1", all_res_r1, allow_pickle=True)
-        np.save("P0_r2", all_res_r2, allow_pickle=True)
-
-        all_res_r1, all_res_r2 = self.downsample_and_distort(self.P1)
-        np.save("P1_r1", all_res_r1, allow_pickle=True)
-        np.save("P1_r2", all_res_r2, allow_pickle=True)
-
-        all_res_r1, all_res_r2 = self.downsample_and_distort(self.Q0)
-        np.save("Q0_r1", all_res_r1, allow_pickle=True)
-        np.save("Q0_r2", all_res_r2, allow_pickle=True)
-
-        all_res_r1, all_res_r2 = self.downsample_and_distort(self.Q1)
-        np.save("Q1_r1", all_res_r1, allow_pickle=True)
-        np.save("Q1_r2", all_res_r2, allow_pickle=True)
 
     def generate_exp_data(self, all_val_trips, all_val_ts):
         all_val_trips, all_val_ts = np.array(all_val_trips), np.array(all_val_ts)
@@ -357,7 +311,7 @@ class Region:
             exact_trj = self.trip2words(trip, ts)
             self.exp_data.append([trip, ts, exact_trj])
             ii += 1
-            if ii > max_num:
+            if ii >= max_num:
                 break
 
         self.all_res_r1, self.all_res_r2 = self.downsample_and_distort(self.exp_data)
@@ -373,8 +327,8 @@ class Region:
         :return:
         """
         mu = 0
-        region_sigma = 0.001
-        time_sigma = 200
+        region_sigma = 0.0005
+        time_sigma = 300
 
         all_res_r1 = []
         for r1 in self.dropping_rates:
@@ -387,6 +341,14 @@ class Region:
                 sampled_trip = trip[randx]
                 sampled_t = ts[randx]
                 sampled_trj = np.array(exact_trj)[randx]
+
+                ## 2022/7/15新增，继续对下采样数据进行一个默认的噪声偏移0.2
+                randx = np.random.rand(len(sampled_trip)) < 0.2
+                randx[0], randx[-1] = False, False
+                sampled_trip[randx] = sampled_trip[randx] + random.gauss(mu, region_sigma)
+                sampled_t[randx] = sampled_t[randx] + random.gauss(mu, time_sigma)
+                # 只需要对需要产生噪声的位置点 编码进行重新更新
+                sampled_trj[randx] = self.trip2words(sampled_trip[randx], sampled_t[randx])
                 res_r1.append([sampled_trip, sampled_t, sampled_trj])
             all_res_r1.append(res_r1)
 
@@ -399,9 +361,14 @@ class Region:
                 randx[0], randx[-1] = False, False
                 trip[randx] = trip[randx] + random.gauss(mu, region_sigma)
                 ts[randx] = ts[randx] + random.gauss(mu, time_sigma)
-                # 只需要对需要产生噪声的位置点 编码进行重新更新
                 exact_trj[randx] = self.trip2words(trip[randx], ts[randx])
-                res_r2.append([trip, ts, exact_trj])
+                ## 2022/7/15新增，继续对噪声偏移数据进行一个默认的下采样0.2
+                randx = np.random.rand(len(trip)) > 0.2
+                randx[0], randx[-1] = True, True
+                sampled_trip = trip[randx]
+                sampled_t = ts[randx]
+                sampled_trj = np.array(exact_trj)[randx]
+                res_r2.append([sampled_trip, sampled_t, sampled_trj])
             all_res_r2.append(res_r2)
         return all_res_r1, all_res_r2
 
@@ -416,8 +383,8 @@ class Region:
         :return: 带噪声和下采样的轨迹编码序列集合
         """
         mu = 0
-        region_sigma = 0.001
-        time_sigma = 200
+        region_sigma = 0.0005
+        time_sigma = 300
 
         # 存储位置序列，时间戳序列，编码值序列
         noise_trips = []
@@ -425,7 +392,7 @@ class Region:
         noise_trjs = []
 
         for dropping_rate in self.dropping_rates:
-            randx = np.random.rand(len(trip))>dropping_rate
+            randx = np.random.rand(len(trip)) > dropping_rate
             # 每条轨迹的起点和终点 设置为 不可下采样删除
             randx[0], randx[-1] = True, True
             sampled_trip = trip[randx]
@@ -438,7 +405,7 @@ class Region:
                 # 每条轨迹的起点和终点不可发生噪声偏移
                 randx[0], randx[-1] = False, False
                 sampled_trip[randx] = sampled_trip[randx] + random.gauss(mu, region_sigma)
-                sampled_t[randx] = sampled_t[randx]+random.gauss(mu,time_sigma)
+                sampled_t[randx] = sampled_t[randx] + random.gauss(mu, time_sigma)
                 # 只需要对需要产生噪声的位置点 编码进行重新更新
                 sampled_trj[randx] = self.trip2words(sampled_trip[randx], sampled_t[randx])
                 noise_trips.append(sampled_trip)
@@ -477,7 +444,7 @@ class Region:
         # 选择时间最接近的热度词输出
         # 初始化一个最小的时间差距 和 一个最小邻居
         min_hot_t = 1000
-        nn = self.UNK
+        nn = settings.UNK
         # 经验证以下找最近邻比利用array快
         for hot_word in k_indexs:
             # 注意这里需要-4来获取每个空间邻居所处的时间段
@@ -493,14 +460,14 @@ class Region:
 
     def lonlat2xyoffset(self, lon, lat):
         '''经纬度转换为米为单位, 映射到平面图上 (116.3, 40.0)->(4,8)'''
-        xoffset = round((lon - self.args.lons[0]) / self.args.scale)
-        yoffset = round((lat - self.args.lats[0]) / self.args.scale)
+        xoffset = round((lon - self.args.lons[0]) / scale)
+        yoffset = round((lat - self.args.lats[0]) / scale)
         return int(xoffset), int(yoffset)
 
     def xyoffset2lonlat(self, xoffset, yoffset):
         ''' 米单位转换为经纬度  (4,8)-> (116.3, 40.0)'''
-        lon = self.args.lons[0]+xoffset*self.args.scale
-        lat = self.args.lats[0]+yoffset*self.args.scale
+        lon = self.args.lons[0]+xoffset*scale
+        lat = self.args.lats[0]+yoffset*scale
         return lon,lat
 
     def offset2spaceId(self, xoffset, yoffset):
@@ -539,8 +506,8 @@ class Region:
 
     def mapId2word(self, map_id):
         ''' map_id -> vocal_id 若不在热度词中，则用与其较近的词代替 '''
-        word = self.hotcell2word.get(map_id, self.UNK)
-        return word if word != self.UNK else self.get_a_nn(map_id)
+        word = self.hotcell2word.get(map_id, settings.UNK)
+        return word if word != settings.UNK else self.get_a_nn(map_id)
 
     def word2mapId(self, word):
         ''' word -> map_id 不会存在查找不到的情况'''
@@ -615,9 +582,14 @@ class Region:
 
 
 if __name__ == "__main__":
-    r = Region()
+    print(time.ctime())
+    city_name, scale, time_size = "porto_randTime", 0.001, 300
+    # city_name, scale, time_size = "porto", 0.001, 300
+    # city_name, scale, time_size = "beijing", 0.001, 200
+    print(city_name, scale, time_size)
+    # 默认生成20万条轨迹用于实验评估
+    r = Region(city_name, scale, time_size, max_trjs_num=1000000, max_exp_num=200000)
     r.run()
-
-
+    print(time.ctime())
         
     

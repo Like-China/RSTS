@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="like@121.48.164.33:22 password" showAutoUploadSettingsWarning="false">
+    <serverData>
+      <paths name="like@121.48.164.33:22 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/codes/similarity_new1_single_GPU" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

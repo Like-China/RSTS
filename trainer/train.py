@@ -171,21 +171,23 @@ def load_data(args):
     train_src = os.path.join(args.data, "train.src")
     train_trg = os.path.join(args.data, "train.trg")
     train_mta = os.path.join(args.data, "train.mta")
-    train_data = DataLoader(train_src, train_trg, train_mta, args.batch, args.bucketsize)
+    train_data = DataLoader(train_src, train_trg, train_mta, args.batch, args.bucket_size)
     print("Reading training data...")
     train_data.load(args.read_train_num)
+    print("trajectory num: %d maxId: %d minId: %d" % (train_data.size, train_data.maxID, train_data.minID))
     print("Allocation: {}".format(train_data.allocation))
     print("Percent: {}".format(train_data.p))
 
-    # 如果存在验证集，加载验证集
+    # load validate data if exists
     val_src = os.path.join(args.data, "val.src")
     val_trg = os.path.join(args.data, "val.trg")
     val_mta = os.path.join(args.data, "val.mta")
     val_data = None
     if os.path.isfile(val_src) and os.path.isfile(val_trg):
-        val_data = DataLoader(val_src, val_trg, val_mta, args.batch, args.bucketsize, True)
+        val_data = DataLoader(val_src, val_trg, val_mta, args.batch, args.bucket_size, True)
         print("Reading validation data...")
         val_data.load(args.read_val_num)
+        print("trajectory num: %d maxId: %d minId: %d"% (val_data.size, val_data.maxID, val_data.minID))
         assert val_data.size > 0, "Validation data size must be greater than 0"
         print("Loaded validation data size {}".format(val_data.size))
     else:
@@ -241,9 +243,12 @@ def train(args):
     m1 = nn.Sequential(nn.Linear(args.hidden_size, args.vocab_size), nn.LogSoftmax(dim=1))
     if args.cuda and torch.cuda.is_available():
         print("=> training with GPU")
+        # m0 = torch.nn.DataParallel(m0, device_ids=settings.ids).cuda()
+        # m1 = torch.nn.DataParallel(m1, device_ids=settings.ids).cuda()
+        # m0 = nn.DataParallel(m0, dim=1)
+        # m1 = nn.DataParallel(m1)
         m0.cuda()
         m1.cuda()
-        #  m0 = nn.DataParallel(m0, dim=1)
     else:
         print("=> training with CPU")
     m0_optimizer = torch.optim.Adam(m0.parameters(), lr=args.learning_rate)
@@ -259,7 +264,7 @@ def train(args):
         best_train_dis_loss = checkpoint["best_train_dis_loss"]
         best_train_loss = checkpoint["best_train_loss"]
         best_val_loss = checkpoint["best_val_loss"]
-        
+
         m0.load_state_dict(checkpoint["m0"])
         m1.load_state_dict(checkpoint["m1"])
         m0_optimizer.load_state_dict(checkpoint["m0_optimizer"])
@@ -289,7 +294,7 @@ def train(args):
             gen_data = train_data.get_batch_generative()
             # 计算生成损失+三元判别损失
             train_gen_loss = genLoss(gen_data, m0, m1, loss_function, args)
-            train_dis_cross, train_dis_inner = 0, 0
+            train_dis_cross, train_dis_inner = torch.tensor(0), torch.tensor(0)
             if args.use_discriminative and iteration % args.dis_freq == 0:
                 # a和p的轨迹更接近 a.src.size = [max_length,128]
                 a, p, n = train_data.get_apn_cross()
@@ -303,7 +308,7 @@ def train(args):
             train_dis_loss = train_dis_cross + train_dis_inner
             train_loss = (1-args.discriminative_w)*train_gen_loss + args.discriminative_w * train_dis_loss
             train_loss.backward()
-            # 限制梯度下降的阈值，防止梯度消失现象
+            # limit the clip of each grad
             clip_grad_norm_(m0.parameters(), args.max_grad_norm)
             clip_grad_norm_(m1.parameters(), args.max_grad_norm)
             m0_optimizer.step()
